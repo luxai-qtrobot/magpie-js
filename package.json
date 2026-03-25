@@ -1,6 +1,6 @@
 {
   "name": "@luxai-qtrobot/magpie",
-  "version": "0.1.0",
+  "version": "0.2.1",
   "description": "MAGPIE messaging engine for TypeScript/JavaScript — transport-agnostic pub/sub and RPC over MQTT/WebSocket",
   "keywords": [
     "mqtt",
