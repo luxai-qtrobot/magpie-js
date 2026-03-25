@@ -1,0 +1,58 @@
+{
+  "name": "@luxai-qtrobot/magpie",
+  "version": "0.1.0",
+  "description": "MAGPIE messaging engine for TypeScript/JavaScript — transport-agnostic pub/sub and RPC over MQTT/WebSocket",
+  "keywords": [
+    "mqtt",
+    "pubsub",
+    "rpc",
+    "messaging",
+    "robotics",
+    "websocket"
+  ],
+  "author": "LuxAI S.A.",
+  "license": "GPL-3.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luxai-qtrobot/magpie-js.git"
+  },
+  "homepage": "https://github.com/luxai-qtrobot/magpie-js#readme",
+  "bugs": {
+    "url": "https://github.com/luxai-qtrobot/magpie-js/issues"
+  },
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "example:publisher": "tsx examples/mqtt_publisher.ts",
+    "example:subscriber": "tsx examples/mqtt_subscriber.ts",
+    "example:requester": "tsx examples/mqtt_requester.ts",
+    "example:responder": "tsx examples/mqtt_responder.ts"
+  },
+  "dependencies": {
+    "@msgpack/msgpack": "^3.0.0",
+    "mqtt": "^5.0.0",
+    "ulidx": "^2.0.0"
+  },
+  "devDependencies": {
+    "tsup": "^8.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.1"
+  }
+}

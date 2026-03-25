@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MAGPIE.js — Browser Demo</title>
+  <link rel="stylesheet" href="demo.css" />
+</head>
+<body>
+
+<header>
+  <h1><span>MAGPIE</span>.js — Browser Demo</h1>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Disconnected</span>
+  </div>
+</header>
+
+<!-- Broker connection bar -->
+<div class="broker-bar">
+  <input id="broker-uri" type="text"
+    value="wss://broker.hivemq.com:8884/mqtt"
+    placeholder="ws://broker:port/mqtt" />
+  <button id="btn-connect" class="primary" onclick="toggleConnect()">Connect</button>
+</div>
+
+<div class="grid">
+
+  <!-- ── PUBLISH ── -->
+  <div class="card">
+    <h2>Publish</h2>
+    <div>
+      <label>Topic</label>
+      <input id="pub-topic" type="text" value="magpie/examples/pubsub" />
+    </div>
+    <div>
+      <label>Message (JSON or plain text)</label>
+      <input id="pub-msg" type="text" value='{"hello": "from browser"}' />
+    </div>
+    <button id="btn-publish" class="primary" disabled onclick="doPublish()">Publish</button>
+  </div>
+
+  <!-- ── SUBSCRIBE ── -->
+  <div class="card">
+    <h2>Subscribe</h2>
+    <div class="row">
+      <div>
+        <label>Topic (wildcards + and # supported)</label>
+        <input id="sub-topic" type="text" value="magpie/examples/pubsub" />
+      </div>
+      <button id="btn-subscribe" class="success" disabled onclick="toggleSubscribe()">Subscribe</button>
+    </div>
+    <div id="sub-log" class="log"><span style="color:#475569">— waiting for messages —</span></div>
+  </div>
+
+  <!-- ── RPC REQUEST ── -->
+  <div class="card">
+    <h2>RPC Request</h2>
+    <div>
+      <label>Service name</label>
+      <input id="req-service" type="text" value="magpie/examples" />
+    </div>
+    <div>
+      <label>Payload (JSON)</label>
+      <input id="req-payload" type="text" value='{"action": "greet", "name": "browser"}' />
+    </div>
+    <button id="btn-request" class="primary" disabled onclick="doRequest()">Send Request</button>
+    <div>
+      <label>Response</label>
+      <div id="req-response" class="response-box waiting">— no response yet —</div>
+    </div>
+  </div>
+
+  <!-- ── RPC RESPONDER ── -->
+  <div class="card">
+    <h2>RPC Responder</h2>
+    <div>
+      <label>Service name</label>
+      <input id="resp-service" type="text" value="magpie/examples" />
+    </div>
+    <button id="btn-responder" class="success" disabled onclick="toggleResponder()">Start Responder</button>
+    <div id="resp-log" class="log"><span style="color:#475569">— responder not started —</span></div>
+  </div>
+
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@luxai-qtrobot/magpie/dist/magpie.umd.js"></script>
+<script src="demo.js"></script>
+</body>
+</html>
