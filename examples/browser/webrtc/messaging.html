@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MAGPIE.js — WebRTC Messaging Demo</title>
+  <link rel="stylesheet" href="demo.css" />
+</head>
+<body>
+
+<header>
+  <h1><span>MAGPIE</span>.js — WebRTC Messaging</h1>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Disconnected</span>
+  </div>
+</header>
+
+<!-- Connection bar -->
+<div class="broker-bar">
+  <input id="broker-uri" type="text"
+    value="wss://broker.hivemq.com:8884/mqtt"
+    placeholder="wss://broker:port/mqtt" />
+  <input id="session-id" class="session-id" type="text"
+    value="my-robot"
+    placeholder="Session ID" />
+  <label class="check">
+    <input type="checkbox" id="no-stun" />
+    No STUN (local)
+  </label>
+  <button id="btn-connect" class="primary" onclick="toggleConnect()">Connect</button>
+</div>
+
+<div class="grid">
+
+  <!-- ── PUBLISH ── -->
+  <div class="card">
+    <h2>Publish</h2>
+    <div>
+      <label>Topic</label>
+      <input id="pub-topic" type="text" value="magpie/demo" />
+    </div>
+    <div>
+      <label>Message (JSON or plain text)</label>
+      <input id="pub-msg" type="text" value='{"action": "greet"}' />
+    </div>
+    <button id="btn-publish" class="primary" disabled onclick="doPublish()">Publish</button>
+  </div>
+
+  <!-- ── SUBSCRIBE ── -->
+  <div class="card">
+    <h2>Subscribe</h2>
+    <div class="row">
+      <div>
+        <label>Topic</label>
+        <input id="sub-topic" type="text" value="magpie/demo" />
+      </div>
+      <button id="btn-subscribe" class="success" disabled onclick="toggleSubscribe()">Subscribe</button>
+    </div>
+    <div id="sub-log" class="log"><span style="color:#475569">— waiting for messages —</span></div>
+  </div>
+
+  <!-- ── RPC REQUEST ── -->
+  <div class="card">
+    <h2>RPC Request</h2>
+    <div>
+      <label>Service name</label>
+      <input id="req-service" type="text" value="magpie/demo" />
+    </div>
+    <div>
+      <label>Payload (JSON)</label>
+      <input id="req-payload" type="text" value='{"action": "move", "x": 1.0}' />
+    </div>
+    <button id="btn-request" class="primary" disabled onclick="doRequest()">Send Request</button>
+    <div>
+      <label>Response</label>
+      <div id="req-response" class="response-box waiting">— no response yet —</div>
+    </div>
+  </div>
+
+  <!-- ── RPC RESPONDER ── -->
+  <div class="card">
+    <h2>RPC Responder</h2>
+    <div>
+      <label>Service name</label>
+      <input id="resp-service" type="text" value="magpie/demo" />
+    </div>
+    <button id="btn-responder" class="success" disabled onclick="toggleResponder()">Start Responder</button>
+    <div id="resp-log" class="log"><span style="color:#475569">— responder not started —</span></div>
+  </div>
+
+</div>
+
+<!--
+  Build the UMD bundle locally first:  npm run build
+  Then open this file via a local HTTP server (e.g. npx serve .)
+  CDN (once WebRTC support is published):
+  <script src="https://cdn.jsdelivr.net/npm/@luxai-qtrobot/magpie/dist/magpie.umd.js"></script>
+-->
+<script src="../../../dist/magpie.umd.js"></script>
+<script src="messaging.js"></script>
+</body>
+</html>

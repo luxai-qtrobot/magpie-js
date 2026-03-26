@@ -5,3 +5,4 @@ export { RpcResponder } from './RpcResponder'
 export type { RequestHandler } from './RpcResponder'
 
 export * from './mqtt/index'
+export * from './webrtc/index'

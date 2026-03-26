@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MAGPIE.js — WebRTC Video Viewer</title>
+  <link rel="stylesheet" href="demo.css" />
+</head>
+<body>
+
+<header>
+  <h1><span>MAGPIE</span>.js — WebRTC Video Viewer</h1>
+  <div id="status">
+    <div id="status-dot"></div>
+    <span id="status-text">Disconnected</span>
+  </div>
+</header>
+
+<!-- Connection bar -->
+<div class="broker-bar">
+  <input id="broker-uri" type="text"
+    value="wss://broker.hivemq.com:8884/mqtt"
+    placeholder="wss://broker:port/mqtt" />
+  <input id="session-id" class="session-id" type="text"
+    value="my-robot"
+    placeholder="Session ID" />
+  <label class="check">
+    <input type="checkbox" id="no-stun" />
+    No STUN (local)
+  </label>
+  <button id="btn-connect" class="primary" onclick="toggleConnect()">Connect</button>
+</div>
+
+<!-- Video player -->
+<div class="video-wrap">
+  <video id="video-el" autoplay playsinline muted></video>
+  <div id="video-placeholder" class="video-placeholder">
+    <div class="icon">📷</div>
+    <div>Waiting for video stream…</div>
+    <div class="hint">Start the Python peer with:<br>
+      <code>magpie-video-capture-webrtc --broker wss://broker.hivemq.com:8884/mqtt --session my-robot --reconnect</code>
+    </div>
+  </div>
+  <div class="video-overlay">
+    <span id="video-badge" class="video-badge warn" style="display:none">● LIVE</span>
+    <span id="res-badge" class="video-badge" style="display:none"></span>
+  </div>
+</div>
+
+<!-- Controls + data log -->
+<div class="grid">
+
+  <!-- ── AUDIO ── -->
+  <div class="card">
+    <h2>Audio</h2>
+    <p class="hint">Browsers mute autoplay by default. Click below to unmute once connected.</p>
+    <div style="display:flex;gap:8px;margin-top:4px">
+      <button id="btn-unmute" class="success" disabled onclick="toggleMute()">🔊 Unmute Audio</button>
+      <button id="btn-fullscreen" class="primary" disabled onclick="goFullscreen()">⛶ Fullscreen</button>
+    </div>
+    <div id="audio-log" class="log" style="min-height:80px">
+      <span style="color:#475569">— waiting for audio track —</span>
+    </div>
+  </div>
+
+  <!-- ── DATA SUBSCRIBE ── -->
+  <div class="card">
+    <h2>Data Subscribe</h2>
+    <p class="hint">Subscribe to any data channel topic published by the remote peer.</p>
+    <div class="row">
+      <div>
+        <label>Topic</label>
+        <input id="data-topic" type="text" value="robot/state" />
+      </div>
+      <button id="btn-subscribe" class="success" disabled onclick="toggleSubscribe()">Subscribe</button>
+    </div>
+    <div id="data-log" class="log"><span style="color:#475569">— waiting for messages —</span></div>
+  </div>
+
+</div>
+
+<style>
+  .video-wrap { max-height: 520px; }
+  .hint { font-size: .78rem; color: #475569; line-height: 1.5; }
+  .hint code {
+    font-size: .75rem;
+    color: #86efac;
+    background: #0f1117;
+    padding: 2px 4px;
+    border-radius: 3px;
+    display: inline-block;
+    margin-top: 4px;
+    white-space: normal;
+    word-break: break-all;
+  }
+</style>
+
+<!--
+  Build the UMD bundle locally first:  npm run build
+  Then open this file via a local HTTP server (e.g. npx serve .)
+  CDN (once WebRTC support is published):
+  <script src="https://cdn.jsdelivr.net/npm/@luxai-qtrobot/magpie/dist/magpie.umd.js"></script>
+-->
+<script src="../../../dist/magpie.umd.js"></script>
+<script src="video.js"></script>
+</body>
+</html>
