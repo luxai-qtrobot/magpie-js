@@ -2,21 +2,21 @@
  * WebRTC-based stream subscriber — implements StreamReader.
  *
  * Receives data published by the remote peer over the shared "magpie" data
- * channel, or receives incoming media tracks. The topic parameter controls
- * routing:
+ * channel, or receives incoming media tracks. Routing depends on the topic and
+ * the connection's useMediaChannels setting:
  *
- * - WebRtcSubscriber.VIDEO_TOPIC ("video"):
- *     read() resolves once with [MediaStreamTrack, "video"] when the remote
- *     video track arrives. Attach it to a <video> element:
+ * useMediaChannels=true (default):
+ * - VIDEO_TOPIC ("video"): read() resolves with [MediaStreamTrack, "video"] when
+ *     the remote RTP video track arrives. Attach to a <video> element:
  *       const [track] = await sub.read()
  *       videoEl.srcObject = new MediaStream([track as MediaStreamTrack])
+ * - AUDIO_TOPIC ("audio"): read() resolves with [MediaStreamTrack, "audio"].
+ * - Any other topic: subscribes to that topic on the data channel.
  *
- * - WebRtcSubscriber.AUDIO_TOPIC ("audio"):
- *     read() resolves once with [MediaStreamTrack, "audio"].
- *
- * - Any other topic:
- *     Subscribes to that topic on the data channel; read() returns
- *     [deserialized_payload, topic] — same pattern as MqttSubscriber.
+ * useMediaChannels=false:
+ * - VIDEO_TOPIC / AUDIO_TOPIC / any topic: all routed via the data channel.
+ *     read() returns [frame-dict, topic] — full topic routing, multiple
+ *     video/audio topics supported.
  *
  * Usage:
  *   const conn = await WebRtcConnection.withMqtt('wss://broker:8884/mqtt', 'my-robot')
@@ -26,7 +26,7 @@
  *   const sub = new WebRtcSubscriber(conn, 'robot/state')
  *   const [data, topic] = await sub.read(5.0)
  *
- *   // Video track
+ *   // RTP video track (useMediaChannels=true, default)
  *   const vsub = new WebRtcSubscriber(conn, WebRtcSubscriber.VIDEO_TOPIC)
  *   const [track] = await vsub.read()
  *   videoEl.srcObject = new MediaStream([track as MediaStreamTrack])
@@ -63,8 +63,8 @@ export class WebRtcSubscriber extends StreamReader {
 
   // Stable bound callbacks for later removal
   private readonly _boundPubCallback?: (payload: unknown, topic: string) => void
-  private readonly _boundVideoCallback?: (track: MediaStreamTrack) => void
-  private readonly _boundAudioCallback?: (track: MediaStreamTrack) => void
+  private readonly _boundVideoCallback?: (data: MediaStreamTrack | Record<string, unknown>) => void
+  private readonly _boundAudioCallback?: (data: MediaStreamTrack | Record<string, unknown>) => void
 
   constructor(connection: WebRtcConnection, topic: string, queueSize = 10) {
     super()
@@ -72,15 +72,21 @@ export class WebRtcSubscriber extends StreamReader {
     this._topic = topic
     this._queueSize = queueSize
 
-    if (topic === WebRtcSubscriber.VIDEO_TOPIC) {
-      this._boundVideoCallback = (track: MediaStreamTrack) =>
-        this._enqueue([track, WebRtcSubscriber.VIDEO_TOPIC])
+    const useMedia = connection.useMediaChannels
+
+    if (useMedia && topic === WebRtcSubscriber.VIDEO_TOPIC) {
+      // useMediaChannels=true + VIDEO_TOPIC → receive RTP track from remote peer
+      this._boundVideoCallback = (data: MediaStreamTrack | Record<string, unknown>) =>
+        this._enqueue([data, WebRtcSubscriber.VIDEO_TOPIC])
       connection.addVideoCallback(this._boundVideoCallback)
-    } else if (topic === WebRtcSubscriber.AUDIO_TOPIC) {
-      this._boundAudioCallback = (track: MediaStreamTrack) =>
-        this._enqueue([track, WebRtcSubscriber.AUDIO_TOPIC])
+    } else if (useMedia && topic === WebRtcSubscriber.AUDIO_TOPIC) {
+      // useMediaChannels=true + AUDIO_TOPIC → receive RTP track from remote peer
+      this._boundAudioCallback = (data: MediaStreamTrack | Record<string, unknown>) =>
+        this._enqueue([data, WebRtcSubscriber.AUDIO_TOPIC])
       connection.addAudioCallback(this._boundAudioCallback)
     } else {
+      // useMediaChannels=false: VIDEO_TOPIC/AUDIO_TOPIC are real topic names on data channel.
+      // Any other topic: normal data channel subscription.
       this._boundPubCallback = (payload: unknown, t: string) =>
         this._enqueue([payload, t])
       connection.addPubCallback(topic, this._boundPubCallback)
@@ -111,9 +117,10 @@ export class WebRtcSubscriber extends StreamReader {
   close(): void {
     this._closed = true
 
-    if (this._topic === WebRtcSubscriber.VIDEO_TOPIC && this._boundVideoCallback) {
+    const useMedia = this._connection.useMediaChannels
+    if (useMedia && this._topic === WebRtcSubscriber.VIDEO_TOPIC && this._boundVideoCallback) {
       this._connection.removeVideoCallback(this._boundVideoCallback)
-    } else if (this._topic === WebRtcSubscriber.AUDIO_TOPIC && this._boundAudioCallback) {
+    } else if (useMedia && this._topic === WebRtcSubscriber.AUDIO_TOPIC && this._boundAudioCallback) {
       this._connection.removeAudioCallback(this._boundAudioCallback)
     } else if (this._boundPubCallback) {
       this._connection.removePubCallback(this._topic, this._boundPubCallback)

@@ -28,4 +28,19 @@ export interface WebRtcOptions {
   dataChannelOrdered?: boolean
   /** Maximum retransmit count for unreliable channels. Undefined = reliable. */
   dataChannelMaxRetransmits?: number
+
+  /**
+   * If true (default), use native WebRTC media tracks for video/audio when
+   * the remote peer supports them.  If false, always use the data channel
+   * fallback regardless of remote capabilities.
+   */
+  useMediaChannels?: boolean
+
+  /**
+   * JPEG quality (1–100) used to compress ImageFrameRaw frames before sending
+   * over the data channel when useMediaChannels=false.
+   * ImageFrameJpeg frames are forwarded as-is without re-encoding.
+   * Default is 80.
+   */
+  mediaChannelJpegQuality?: number
 }

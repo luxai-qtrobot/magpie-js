@@ -27,8 +27,12 @@ import { WebRtcSignaler, MqttSignaler } from './WebRtcSignaler'
 
 type PubCallback = (payload: unknown, topic: string) => void
 type RpcCallback = (msg: unknown) => void
-type VideoCallback = (track: MediaStreamTrack) => void
-type AudioCallback = (track: MediaStreamTrack) => void
+/** Video callback: receives a MediaStreamTrack (media track path) or a
+ *  raw frame dict (magpie-media fallback path when media tracks are not negotiated). */
+type VideoCallback = (data: MediaStreamTrack | Record<string, unknown>) => void
+/** Audio callback: receives a MediaStreamTrack (media track path) or a
+ *  raw frame dict (magpie-media fallback path). */
+type AudioCallback = (data: MediaStreamTrack | Record<string, unknown>) => void
 
 
 export class WebRtcConnection {
@@ -45,6 +49,14 @@ export class WebRtcConnection {
   // ---- WebRTC objects -----------------------------------------------------
   private _pc: RTCPeerConnection | null = null
   private _dataChannel: RTCDataChannel | null = null
+  // ---- magpie-media unreliable channel (audio/video fallback, useMediaChannels=true only) ----
+  private _mediaChannel: RTCDataChannel | null = null
+  private _videoNegotiated = false
+  private _audioNegotiated = false
+
+  // ---- Drop-stale media send (useMediaChannels=false path) ----------------
+  private _pendingMediaSend: Uint8Array | null = null
+  private _mediaSendScheduled = false
 
   // ---- Local media (set before connect()) ---------------------------------
   private _localVideoTrack: MediaStreamTrack | null = null
@@ -94,6 +106,8 @@ export class WebRtcConnection {
       iceTransportPolicy: o.iceTransportPolicy ?? 'all',
       dataChannelOrdered: o.dataChannelOrdered ?? true,
       dataChannelMaxRetransmits: o.dataChannelMaxRetransmits,
+      useMediaChannels: o.useMediaChannels ?? true,
+      mediaChannelJpegQuality: o.mediaChannelJpegQuality ?? 80,
     }
 
     Logger.debug(`WebRtcConnection: peerId=${this._peerId}, sessionId=${this.sessionId}`)
@@ -142,6 +156,14 @@ export class WebRtcConnection {
 
   get peerId(): string { return this._peerId }
   get isConnected(): boolean { return this._connected }
+  /** True if a native video media track was established with the remote peer. */
+  get videoNegotiated(): boolean { return this._videoNegotiated }
+  /** True if a native audio media track was established with the remote peer. */
+  get audioNegotiated(): boolean { return this._audioNegotiated }
+  /** Whether native WebRTC media tracks are used for video/audio (vs data channel). */
+  get useMediaChannels(): boolean { return this._opts.useMediaChannels }
+  /** JPEG quality (1–100) used when compressing frames sent over the data channel. */
+  get mediaChannelJpegQuality(): number { return this._opts.mediaChannelJpegQuality ?? 80 }
 
   /**
    * Add a local video track to be sent to the remote peer.
@@ -205,6 +227,7 @@ export class WebRtcConnection {
       this._pc = null
     }
     this._dataChannel = null
+    this._mediaChannel = null
 
     await this._signaler.disconnect()
     Logger.debug(`WebRtcConnection(${this._peerId}): disconnected.`)
@@ -275,6 +298,46 @@ export class WebRtcConnection {
     }
   }
 
+  /**
+   * Send a video or audio frame on the magpie-media unreliable data channel.
+   * Use when the remote peer does not support media tracks (e.g. the C++ port).
+   * msg should be: { kind: 'video'|'audio', topic: string, payload: <frame-dict> }
+   */
+  sendMediaFrame(msg: unknown): void {
+    if (!this._mediaChannel || this._mediaChannel.readyState !== 'open') return
+    try {
+      const payload = this._serializer.serialize(msg)
+      this._mediaChannel.send(payload as Uint8Array<ArrayBuffer>)
+    } catch (e) {
+      Logger.warning(`WebRtcConnection(${this._peerId}): sendMediaFrame failed: ${e}`)
+    }
+  }
+
+  /**
+   * Enqueue a pre-serialized media frame for sending via the reliable data channel.
+   * Used when useMediaChannels=false. Drop-stale: only the latest pending frame is kept,
+   * so a slow consumer never accumulates a backlog of stale video frames.
+   */
+  enqueueMediaSend(payload: Uint8Array): void {
+    this._pendingMediaSend = payload
+    if (!this._mediaSendScheduled) {
+      this._mediaSendScheduled = true
+      setTimeout(() => {
+        this._mediaSendScheduled = false
+        const data = this._pendingMediaSend
+        this._pendingMediaSend = null
+        if (!data) return
+        if (this._dataChannel && this._dataChannel.readyState === 'open') {
+          try {
+            this._dataChannel.send(data as unknown as Uint8Array<ArrayBuffer>)
+          } catch (e) {
+            Logger.warning(`WebRtcConnection(${this._peerId}): enqueueMediaSend failed: ${e}`)
+          }
+        }
+      }, 0)
+    }
+  }
+
   // ---- Private: connection setup ------------------------------------------
 
   private _resolveConnect(value: boolean): void {
@@ -332,22 +395,33 @@ export class WebRtcConnection {
     }
 
     pc.ondatachannel = (event) => {
-      // Answerer receives the data channel created by the offerer
       if (event.channel.label === 'magpie') {
         this._dataChannel = event.channel
         this._setupDataChannel(event.channel)
+      } else if (event.channel.label === 'magpie-media' && this._opts.useMediaChannels) {
+        // magpie-media is only used as fallback when useMediaChannels=true
+        this._mediaChannel = event.channel
+        this._setupMediaChannel(event.channel)
       }
     }
 
     pc.ontrack = (event) => {
       const track = event.track
       if (track.kind === 'video') {
+        // Only set negotiated when we actually sent a local video track (publisher side)
+        if (this._opts.useMediaChannels && this._localVideoTrack !== null) {
+          this._videoNegotiated = true
+        }
         for (const cb of [...this._videoCallbacks]) {
           try { cb(track) } catch (e) {
             Logger.warning(`WebRtcConnection(${this._peerId}): video callback error: ${e}`)
           }
         }
       } else if (track.kind === 'audio') {
+        // Only set negotiated when we actually sent a local audio track (publisher side)
+        if (this._opts.useMediaChannels && this._localAudioTrack !== null) {
+          this._audioNegotiated = true
+        }
         for (const cb of [...this._audioCallbacks]) {
           try { cb(track) } catch (e) {
             Logger.warning(`WebRtcConnection(${this._peerId}): audio callback error: ${e}`)
@@ -399,17 +473,26 @@ export class WebRtcConnection {
     this._dataChannel = dc
     this._setupDataChannel(dc)
 
-    // Add local media tracks or recvonly transceivers for symmetry with Python
-    // (Python aiortc always includes video+audio in SDP)
-    if (this._localVideoTrack) {
-      pc.addTrack(this._localVideoTrack)
-    } else {
-      pc.addTransceiver('video', { direction: 'recvonly' })
+    // magpie-media unreliable DC only when useMediaChannels=true (RTP fallback).
+    // When useMediaChannels=false, video/audio goes through the reliable magpie DC.
+    if (this._opts.useMediaChannels) {
+      const mediaDc = pc.createDataChannel('magpie-media', { ordered: false, maxRetransmits: 0 })
+      this._mediaChannel = mediaDc
+      this._setupMediaChannel(mediaDc)
     }
-    if (this._localAudioTrack) {
-      pc.addTrack(this._localAudioTrack)
-    } else {
-      pc.addTransceiver('audio', { direction: 'recvonly' })
+
+    // Add local media tracks or recvonly transceivers only if media channels enabled
+    if (this._opts.useMediaChannels) {
+      if (this._localVideoTrack) {
+        pc.addTrack(this._localVideoTrack)
+      } else {
+        pc.addTransceiver('video', { direction: 'recvonly' })
+      }
+      if (this._localAudioTrack) {
+        pc.addTrack(this._localAudioTrack)
+      } else {
+        pc.addTransceiver('audio', { direction: 'recvonly' })
+      }
     }
 
     const offer = await pc.createOffer()
@@ -440,6 +523,44 @@ export class WebRtcConnection {
     }
   }
 
+  private _setupMediaChannel(dc: RTCDataChannel): void {
+    dc.binaryType = 'arraybuffer'
+    dc.onopen = () => Logger.debug(`WebRtcConnection(${this._peerId}): media channel open.`)
+    dc.onclose = () => Logger.debug(`WebRtcConnection(${this._peerId}): media channel closed.`)
+    dc.onmessage = (event) => {
+      try {
+        const raw = event.data instanceof ArrayBuffer
+          ? new Uint8Array(event.data)
+          : event.data as Uint8Array
+        const msg = this._serializer.deserialize(raw)
+        this._routeMediaMessage(msg)
+      } catch (e) {
+        Logger.warning(`WebRtcConnection(${this._peerId}): media channel message error: ${e}`)
+      }
+    }
+  }
+
+  private _routeMediaMessage(msg: unknown): void {
+    // magpie-media is the fallback path when useMediaChannels=true but RTP was
+    // not fully negotiated (e.g. connecting to a C++ peer).  Subscribers that
+    // registered for VIDEO_TOPIC / AUDIO_TOPIC via addVideoCallback /
+    // addAudioCallback receive these frames.
+    if (!msg || typeof msg !== 'object') return
+    const m = msg as Record<string, unknown>
+    const kind = m['kind'] as string | undefined
+    const payload = m['payload']
+
+    if ((kind !== 'video' && kind !== 'audio') || !payload || typeof payload !== 'object') return
+
+    const topic = (m['topic'] as string | undefined) || kind
+    const callbacks = kind === 'video' ? [...this._videoCallbacks] : [...this._audioCallbacks]
+    for (const cb of callbacks) {
+      try { cb(payload as Record<string, unknown>) } catch (e) {
+        Logger.warning(`WebRtcConnection: media ${kind} callback error (topic='${topic}'): ${e}`)
+      }
+    }
+  }
+
   private _routeDataMessage(msg: unknown): void {
     if (!msg || typeof msg !== 'object') return
     const m = msg as Record<string, unknown>
@@ -465,6 +586,20 @@ export class WebRtcConnection {
         }
       } else {
         Logger.warning(`WebRtcConnection(${this._peerId}): no handler for service '${service}'`)
+      }
+
+    } else if (msgType === 'media') {
+      // Video/audio frame routed via reliable data channel (useMediaChannels=false path)
+      const topic = (m['topic'] as string | undefined) ?? ''
+      const payload = m['payload']
+      if (!topic || !payload || typeof payload !== 'object') return
+      const callbacks = this._pubCallbacks.get(topic)
+      if (callbacks) {
+        for (const cb of [...callbacks]) {
+          try { cb(payload, topic) } catch (e) {
+            Logger.warning(`WebRtcConnection: media data callback error for '${topic}': ${e}`)
+          }
+        }
       }
 
     } else if (msgType === 'rpc_ack' || msgType === 'rpc_rep') {
@@ -541,9 +676,11 @@ export class WebRtcConnection {
       Logger.debug(`WebRtcConnection(${this._peerId}): received SDP offer.`)
 
       const pc = this._pc!
-      // Add local tracks before setting remote description (mirrors Python)
-      if (this._localVideoTrack) pc.addTrack(this._localVideoTrack)
-      if (this._localAudioTrack) pc.addTrack(this._localAudioTrack)
+      // Add local tracks before setting remote description (only if media channels enabled)
+      if (this._opts.useMediaChannels) {
+        if (this._localVideoTrack) pc.addTrack(this._localVideoTrack)
+        if (this._localAudioTrack) pc.addTrack(this._localAudioTrack)
+      }
 
       await pc.setRemoteDescription({ sdp, type: 'offer' })
       await this._flushPendingIce()
@@ -602,10 +739,15 @@ export class WebRtcConnection {
 
     if (this._pc) { this._pc.close(); this._pc = null }
     this._dataChannel = null
+    this._mediaChannel = null
+    this._videoNegotiated = false
+    this._audioNegotiated = false
     this._remotePeerId = null
     this._roleDecided = false
     this._pendingIceCandidates = []
     this._connected = false
+    this._pendingMediaSend = null
+    this._mediaSendScheduled = false
 
     // New peer_id so both sides re-run role negotiation cleanly
     this._peerId = getUniqueId().slice(0, 12)
