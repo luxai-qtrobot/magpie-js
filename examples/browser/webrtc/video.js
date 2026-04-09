@@ -8,6 +8,7 @@ let dataSub     = null
 let dataActive  = false
 let muted       = true
 let audioTrack  = null
+let audioEl     = null   // dedicated Audio element, avoids stalled-video-track issue
 
 const videoEl = () => document.getElementById('video-el')
 
@@ -104,6 +105,7 @@ async function cleanup() {
   audioTrack  = null
   muted       = true
   v.muted     = true
+  if (audioEl) { audioEl.pause(); audioEl.srcObject = null; audioEl = null }
 
   document.getElementById('video-placeholder').classList.remove('hidden')
   document.getElementById('video-badge').style.display  = 'none'
@@ -152,22 +154,37 @@ function updateResBadge(v) {
 
 async function waitForAudio() {
   try {
+    console.log('[audio] waitForAudio: waiting for audio track...')
     const [track] = await audioSub.read(60)
     audioTrack = track
-    appendLog('audio-log', 'Audio track received — click Unmute to hear it.')
+    console.log('[audio] track received — kind:', track.kind, 'readyState:', track.readyState, 'enabled:', track.enabled, 'muted:', track.muted)
+    appendLog('audio-log', `Audio track received (readyState=${track.readyState}, muted=${track.muted}) — click Unmute to hear it.`)
 
-    // Attach audio track to the video element (it handles both A/V)
-    const v = videoEl()
-    const stream = v.srcObject
-    if (stream) {
-      stream.addTrack(track)
-    } else {
-      // Video not yet ready; create a stream with audio only
-      v.srcObject = new MediaStream([track])
-      await v.play().catch(() => {})
+    // Monitor RTP lifecycle — muted=true means no RTP yet; unmute fires when data arrives
+    track.onunmute = () => {
+      console.log('[audio] track UNMUTED — RTP is now flowing!')
+      appendLog('audio-log', 'Audio RTP flowing (track unmuted).')
     }
-  } catch {
-    // No audio track
+    track.onmute = () => {
+      console.log('[audio] track MUTED — RTP stopped.')
+      appendLog('audio-log', 'Audio RTP stopped (track muted).', true)
+    }
+    track.onended = () => {
+      console.log('[audio] track ENDED.')
+      appendLog('audio-log', 'Audio track ended.', true)
+    }
+
+    // Use a dedicated <audio> element so a stalled/empty video track
+    // cannot block audio playback (Chrome stalls <video> when video track has no RTP)
+    audioEl = new Audio()
+    audioEl.srcObject = new MediaStream([track])
+    audioEl.muted = true   // start muted; user clicks Unmute to hear it
+    console.log('[audio] starting dedicated audio element...')
+    await audioEl.play().catch((e) => console.warn('[audio] audioEl.play() rejected:', e))
+    console.log('[audio] audioEl playing — paused:', audioEl.paused, 'muted:', audioEl.muted)
+  } catch (e) {
+    console.error('[audio] waitForAudio error:', e)
+    appendLog('audio-log', `Audio error: ${e?.message ?? e}`, true)
   }
 }
 
@@ -176,13 +193,19 @@ function toggleMute() {
   const btn = document.getElementById('btn-unmute')
   muted = !muted
   v.muted = muted
+  console.log('[audio] toggleMute: muted=', muted, 'v.srcObject tracks:', v.srcObject?.getTracks().map(t => `${t.kind}(${t.readyState})`))
   if (!muted) {
-    // Trigger play if needed (browser may have blocked autoplay)
-    v.play().catch(() => {})
+    // Unmute the dedicated audio element (user gesture satisfies autoplay policy)
+    if (audioEl) {
+      audioEl.muted = false
+      audioEl.play().catch((e) => console.warn('[audio] audioEl.play() after unmute rejected:', e))
+    }
+    v.play().catch((e) => console.warn('[audio] play() after unmute rejected:', e))
     btn.textContent = '🔇 Mute Audio'
     btn.className   = 'danger'
     appendLog('audio-log', 'Audio unmuted.')
   } else {
+    if (audioEl) audioEl.muted = true
     btn.textContent = '🔊 Unmute Audio'
     btn.className   = 'success'
   }
