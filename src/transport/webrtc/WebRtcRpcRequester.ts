@@ -57,11 +57,11 @@ export class WebRtcRpcRequester extends RpcRequester {
     Logger.debug(`WebRtcRpcRequester: ready for service '${this._serviceName}'.`)
   }
 
-  async call(request: unknown, timeout = 5.0): Promise<unknown> {
+  async call(request: unknown, timeout?: number): Promise<unknown> {
     const rid = getUniqueId()
 
     return new Promise<unknown>((resolve, reject) => {
-      const ackDeadline = Math.min(timeout, this._ackTimeout)
+      const ackDeadline = timeout !== undefined ? Math.min(timeout, this._ackTimeout) : this._ackTimeout
 
       const pending: PendingCall = {
         ackTimer: null,
@@ -85,12 +85,14 @@ export class WebRtcRpcRequester extends RpcRequester {
         if (type === 'rpc_ack') {
           // ACK received — cancel ack timer, arm reply timer
           if (pending.ackTimer) { clearTimeout(pending.ackTimer); pending.ackTimer = null }
-          pending.replyTimer = setTimeout(() => {
-            cleanup()
-            reject(new ReplyTimeoutError(
-              `WebRtcRpcRequester: no reply from '${this._serviceName}' within ${timeout}s`,
-            ))
-          }, timeout * 1000)
+          if (timeout !== undefined) {
+            pending.replyTimer = setTimeout(() => {
+              cleanup()
+              reject(new ReplyTimeoutError(
+                `WebRtcRpcRequester: no reply from '${this._serviceName}' within ${timeout}s`,
+              ))
+            }, timeout * 1000)
+          }
 
         } else if (type === 'rpc_rep') {
           cleanup()

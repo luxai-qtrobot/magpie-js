@@ -42,7 +42,12 @@ export class MqttConnection {
       const mqttOpts: IClientOptions = {
         clientId: this.clientId,
         clean: this.options.session?.cleanStart ?? true,
-        reconnectPeriod: (this.options.reconnect?.minDelaySec ?? 1) * 1000,
+        // reconnectPeriod=0 disables auto-reconnect in mqtt.js.
+        // When options.reconnect is absent, default to 1 s reconnect.
+        // When options.reconnect is present with minDelaySec=0, disable reconnect.
+        reconnectPeriod: this.options.reconnect === undefined
+          ? 1000
+          : (this.options.reconnect.minDelaySec ?? 1) * 1000,
         connectTimeout: timeout,
       }
 

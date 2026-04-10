@@ -369,7 +369,9 @@ export class WebRtcConnection {
 
       if (state === 'connected') {
         this._connected = true
-        this._resolveConnect(true)
+        // _resolveConnect(true) is called from _setupDataChannel's onopen,
+        // matching Python behaviour: connect() only resolves once the data
+        // channel is ready to send (not just when ICE is established).
       } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
         this._connected = false
         this._resolveConnect(false)
@@ -507,7 +509,20 @@ export class WebRtcConnection {
   private _setupDataChannel(dc: RTCDataChannel): void {
     dc.binaryType = 'arraybuffer'
 
-    dc.onopen = () => Logger.debug(`WebRtcConnection(${this._peerId}): data channel open.`)
+    dc.onopen = () => {
+      Logger.debug(`WebRtcConnection(${this._peerId}): data channel open.`)
+      // Resolve connect() here — mirrors Python: connect() only returns once
+      // the data channel is ready to send, not just when ICE is established.
+      this._resolveConnect(true)
+    }
+
+    // Answerer: ondatachannel may fire when the channel is already open,
+    // in which case onopen never fires — handle it immediately.
+    if (dc.readyState === 'open') {
+      Logger.debug(`WebRtcConnection(${this._peerId}): data channel already open.`)
+      this._resolveConnect(true)
+    }
+
     dc.onclose = () => Logger.debug(`WebRtcConnection(${this._peerId}): data channel closed.`)
 
     dc.onmessage = (event) => {

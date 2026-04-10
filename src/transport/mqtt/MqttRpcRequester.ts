@@ -60,7 +60,7 @@ export class MqttRpcRequester extends RpcRequester {
     Logger.debug(`MqttRpcRequester: req='${this._reqTopic}', rep='${this._repTopic}'`)
   }
 
-  async call(request: unknown, timeout = 5.0): Promise<unknown> {
+  async call(request: unknown, timeout?: number): Promise<unknown> {
     const rid = getUniqueId()
 
     return new Promise<unknown>((resolve, reject) => {
@@ -73,7 +73,7 @@ export class MqttRpcRequester extends RpcRequester {
         this._pending.delete(rid)
       }
 
-      const ackDeadline = Math.min(timeout, this._ackTimeout)
+      const ackDeadline = timeout !== undefined ? Math.min(timeout, this._ackTimeout) : this._ackTimeout
 
       ackTimer = setTimeout(() => {
         cleanup()
@@ -85,12 +85,14 @@ export class MqttRpcRequester extends RpcRequester {
       this._pending.set(rid, {
         onAck: () => {
           if (ackTimer) clearTimeout(ackTimer)
-          replyTimer = setTimeout(() => {
-            cleanup()
-            reject(new ReplyTimeoutError(
-              `MqttRpcRequester: no reply from '${this._reqTopic}' within ${timeout}s`
-            ))
-          }, timeout * 1000)
+          if (timeout !== undefined) {
+            replyTimer = setTimeout(() => {
+              cleanup()
+              reject(new ReplyTimeoutError(
+                `MqttRpcRequester: no reply from '${this._reqTopic}' within ${timeout}s`
+              ))
+            }, timeout * 1000)
+          }
         },
         onReply: (payload: unknown) => {
           cleanup()

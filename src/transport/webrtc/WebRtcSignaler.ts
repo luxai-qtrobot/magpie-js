@@ -98,7 +98,10 @@ export class MqttSignaler extends WebRtcSignaler {
     sessionId: string,
     options?: MqttOptions & { clientId?: string; timeout?: number },
   ): Promise<MqttSignaler> {
-    const conn = new MqttConnection(brokerUrl, options)
+    // Disable auto-reconnect on the signaling connection — after WebRTC is
+    // established the data channel takes over; persistent MQTT reconnect loops
+    // only create noise and break the SDK's disconnect logic.
+    const conn = new MqttConnection(brokerUrl, { ...options, reconnect: { minDelaySec: 0 } })
     await conn.connect((options?.timeout ?? 10) * 1000)
     return new MqttSignaler(conn, sessionId)
   }
