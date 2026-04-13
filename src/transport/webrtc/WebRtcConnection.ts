@@ -81,6 +81,10 @@ export class WebRtcConnection {
   private _videoCallbacks: VideoCallback[] = []
   private _audioCallbacks: AudioCallback[] = []
 
+  // ---- Last received media tracks (for late subscribers) ------------------
+  private _lastVideoTrack: MediaStreamTrack | null = null
+  private _lastAudioTrack: MediaStreamTrack | null = null
+
   // ---- Bound signal handler (stable reference for unsubscribe) ------------
   private readonly _boundSignalHandler: (payload: Uint8Array) => void
 
@@ -162,6 +166,10 @@ export class WebRtcConnection {
   get audioNegotiated(): boolean { return this._audioNegotiated }
   /** Whether native WebRTC media tracks are used for video/audio (vs data channel). */
   get useMediaChannels(): boolean { return this._opts.useMediaChannels }
+  /** Last received remote video track, or null if none has arrived yet. */
+  get videoTrack(): MediaStreamTrack | null { return this._lastVideoTrack }
+  /** Last received remote audio track, or null if none has arrived yet. */
+  get audioTrack(): MediaStreamTrack | null { return this._lastAudioTrack }
   /** JPEG quality (1–100) used when compressing frames sent over the data channel. */
   get mediaChannelJpegQuality(): number { return this._opts.mediaChannelJpegQuality ?? 80 }
 
@@ -267,6 +275,11 @@ export class WebRtcConnection {
    */
   addVideoCallback(callback: VideoCallback): void {
     this._videoCallbacks.push(callback)
+    if (this._lastVideoTrack !== null) {
+      try { callback(this._lastVideoTrack) } catch (e) {
+        Logger.warning(`WebRtcConnection(${this._peerId}): video callback error: ${e}`)
+      }
+    }
   }
 
   removeVideoCallback(callback: VideoCallback): void {
@@ -278,6 +291,11 @@ export class WebRtcConnection {
    */
   addAudioCallback(callback: AudioCallback): void {
     this._audioCallbacks.push(callback)
+    if (this._lastAudioTrack !== null) {
+      try { callback(this._lastAudioTrack) } catch (e) {
+        Logger.warning(`WebRtcConnection(${this._peerId}): audio callback error: ${e}`)
+      }
+    }
   }
 
   removeAudioCallback(callback: AudioCallback): void {
@@ -414,6 +432,7 @@ export class WebRtcConnection {
         if (this._opts.useMediaChannels && this._localVideoTrack !== null) {
           this._videoNegotiated = true
         }
+        this._lastVideoTrack = track
         for (const cb of [...this._videoCallbacks]) {
           try { cb(track) } catch (e) {
             Logger.warning(`WebRtcConnection(${this._peerId}): video callback error: ${e}`)
@@ -424,6 +443,7 @@ export class WebRtcConnection {
         if (this._opts.useMediaChannels && this._localAudioTrack !== null) {
           this._audioNegotiated = true
         }
+        this._lastAudioTrack = track
         for (const cb of [...this._audioCallbacks]) {
           try { cb(track) } catch (e) {
             Logger.warning(`WebRtcConnection(${this._peerId}): audio callback error: ${e}`)
