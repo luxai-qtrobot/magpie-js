@@ -24,6 +24,16 @@
   <input id="session-id" class="session-id" type="text"
     value="my-robot"
     placeholder="Session ID" />
+  <input id="video-topic" type="text"
+    value="video"
+    placeholder="Video topic"
+    style="width:140px"
+    title="RTP video topic (must match the Python peer's --topic)" />
+  <input id="audio-topic" type="text"
+    value="audio"
+    placeholder="Audio topic"
+    style="width:140px"
+    title="RTP audio topic (must match the Python peer's --topic)" />
   <label class="check">
     <input type="checkbox" id="no-stun" />
     No STUN (local)
@@ -38,7 +48,8 @@
     <div class="icon">📷</div>
     <div>Waiting for video stream…</div>
     <div class="hint">Start the Python peer with:<br>
-      <code>magpie-video-capture-webrtc --broker wss://broker.hivemq.com:8884/mqtt --session my-robot --reconnect</code>
+      <code>magpie-video-capture-webrtc --broker wss://broker.hivemq.com:8884/mqtt --session my-robot video --reconnect</code><br>
+      Topic must match the Video Topic field above (default: <code>video</code>).
     </div>
   </div>
   <div class="video-overlay">

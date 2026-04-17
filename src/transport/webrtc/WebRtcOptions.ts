@@ -43,4 +43,18 @@ export interface WebRtcOptions {
    * Default is 80.
    */
   mediaChannelJpegQuality?: number
+
+  /**
+   * Topic paths that map to RTP video tracks.
+   * Each path gets its own RTP video transceiver (one m-line in SDP).
+   * Topics can also be declared at runtime via conn.sendVideoTrack() /
+   * conn.receiveVideoTrack() before connect().
+   */
+  videoTopics?: string[]
+
+  /**
+   * Topic paths that map to RTP audio tracks.
+   * Each path gets its own RTP audio transceiver (one m-line in SDP).
+   */
+  audioTopics?: string[]
 }

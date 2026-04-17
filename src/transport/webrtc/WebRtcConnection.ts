@@ -9,13 +9,24 @@
  * - Signaling (SDP offer/answer + ICE candidates) is exchanged via a
  *   WebRtcSignaler — use MqttSignaler for internet connectivity.
  * - Role (offer vs answer) is auto-negotiated: both peers broadcast a "hello"
- *   message; the peer with the lexicographically higher peerId creates the offer.
+ *   message that includes their topic lists; the peer with the lexicographically
+ *   higher peerId creates the offer using the union of both sides' topics.
+ * - Each entry in videoTopics/audioTopics maps to one RTP transceiver (m-line).
+ *   Both sides use the full union so m-line counts always match.
  * - Data channel routing uses the same wire envelope as Python:
  *     { type: "pub" | "rpc_req" | "rpc_ack" | "rpc_rep", ... }
- * - Incoming video/audio tracks are exposed via callbacks (MediaStreamTrack).
- * - Local video/audio tracks can be added before connect() for sending media.
  *
- * Wire protocol is 100% compatible with Python's WebRTCConnection.
+ * Media API
+ * ---------
+ * Sending (before connect()):
+ *   conn.sendVideoTrack(track, topic)   // browser camera → remote peer on topic
+ *   conn.sendAudioTrack(track, topic)   // browser mic    → remote peer on topic
+ *
+ * Receiving:
+ *   const track = await conn.receiveVideoTrack(topic)   // Promise<MediaStreamTrack>
+ *   const track = await conn.receiveAudioTrack(topic)   // Promise<MediaStreamTrack>
+ *
+ * Wire protocol is 100% compatible with Python's WebRTCConnection (0.8.8+).
  */
 
 import { MsgpackSerializer } from '../../serializer/MsgpackSerializer'
@@ -27,12 +38,12 @@ import { WebRtcSignaler, MqttSignaler } from './WebRtcSignaler'
 
 type PubCallback = (payload: unknown, topic: string) => void
 type RpcCallback = (msg: unknown) => void
-/** Video callback: receives a MediaStreamTrack (media track path) or a
- *  raw frame dict (magpie-media fallback path when media tracks are not negotiated). */
-type VideoCallback = (data: MediaStreamTrack | Record<string, unknown>) => void
-/** Audio callback: receives a MediaStreamTrack (media track path) or a
- *  raw frame dict (magpie-media fallback path). */
-type AudioCallback = (data: MediaStreamTrack | Record<string, unknown>) => void
+
+/** Compute union: own topics + remote-only topics not already in own. */
+function _unionTopics(own: string[], remote: string[]): string[] {
+  const seen = new Set(own)
+  return [...own, ...remote.filter(t => !seen.has(t))]
+}
 
 
 export class WebRtcConnection {
@@ -43,24 +54,57 @@ export class WebRtcConnection {
   // ---- Config -------------------------------------------------------------
   private readonly _signaler: WebRtcSignaler
   private readonly _reconnect: boolean
-  private readonly _opts: Required<Omit<WebRtcOptions, 'dataChannelMaxRetransmits'>> & Pick<WebRtcOptions, 'dataChannelMaxRetransmits'>
+  private readonly _opts: {
+    stunServers: string[]
+    turnServers: WebRtcTurnServer[]
+    iceTransportPolicy: RTCIceTransportPolicy
+    dataChannelOrdered: boolean
+    dataChannelMaxRetransmits?: number
+    useMediaChannels: boolean
+    mediaChannelJpegQuality: number
+  }
   private readonly _serializer = new MsgpackSerializer()
 
   // ---- WebRTC objects -----------------------------------------------------
   private _pc: RTCPeerConnection | null = null
   private _dataChannel: RTCDataChannel | null = null
-  // ---- magpie-media unreliable channel (audio/video fallback, useMediaChannels=true only) ----
   private _mediaChannel: RTCDataChannel | null = null
-  private _videoNegotiated = false
-  private _audioNegotiated = false
 
   // ---- Drop-stale media send (useMediaChannels=false path) ----------------
   private _pendingMediaSend: Uint8Array | null = null
   private _mediaSendScheduled = false
 
-  // ---- Local media (set before connect()) ---------------------------------
-  private _localVideoTrack: MediaStreamTrack | null = null
-  private _localAudioTrack: MediaStreamTrack | null = null
+  // ---- Own topic lists (mutable — updated by sendVideoTrack/receiveVideoTrack) ----
+  private _videoTopics: string[]
+  private _audioTopics: string[]
+
+  // ---- Local tracks to send (topic → track, set before connect()) ---------
+  private _localVideoTracks = new Map<string, MediaStreamTrack>()
+  private _localAudioTracks = new Map<string, MediaStreamTrack>()
+
+  // ---- Remote peer's topics (from hello / offer) --------------------------
+  private _remoteVideoTopics: string[] = []
+  private _remoteAudioTopics: string[] = []
+
+  // ---- Union topics used for this negotiation (audio-first, then video) ---
+  private _unionVideoTopics: string[] = []
+  private _unionAudioTopics: string[] = []
+
+  // ---- ontrack index counters (reset on each connection) ------------------
+  private _videoTrackIdx = 0
+  private _audioTrackIdx = 0
+
+  // ---- Received remote tracks (topic → track, for late subscribers) -------
+  private _receivedVideoTracks = new Map<string, MediaStreamTrack>()
+  private _receivedAudioTracks = new Map<string, MediaStreamTrack>()
+
+  // ---- Pending receiveVideoTrack / receiveAudioTrack promises -------------
+  private _videoTrackWaiters = new Map<string, Array<(track: MediaStreamTrack) => void>>()
+  private _audioTrackWaiters = new Map<string, Array<(track: MediaStreamTrack) => void>>()
+
+  // ---- Negotiated state (per topic) ---------------------------------------
+  private _videoNegotiated = new Set<string>()
+  private _audioNegotiated = new Set<string>()
 
   // ---- Signaling state ----------------------------------------------------
   private _remotePeerId: string | null = null
@@ -74,16 +118,10 @@ export class WebRtcConnection {
   private _connectTimer: ReturnType<typeof setTimeout> | null = null
   private _helloTimer: ReturnType<typeof setTimeout> | null = null
 
-  // ---- Message routing ----------------------------------------------------
+  // ---- Data-channel message routing ---------------------------------------
   private _pubCallbacks = new Map<string, Set<PubCallback>>()
   private _rpcServiceCallbacks = new Map<string, RpcCallback>()
   private _rpcReplyCallbacks = new Map<string, RpcCallback>()
-  private _videoCallbacks: VideoCallback[] = []
-  private _audioCallbacks: AudioCallback[] = []
-
-  // ---- Last received media tracks (for late subscribers) ------------------
-  private _lastVideoTrack: MediaStreamTrack | null = null
-  private _lastAudioTrack: MediaStreamTrack | null = null
 
   // ---- Bound signal handler (stable reference for unsubscribe) ------------
   private readonly _boundSignalHandler: (payload: Uint8Array) => void
@@ -105,14 +143,16 @@ export class WebRtcConnection {
 
     const o = options?.webrtcOptions ?? {}
     this._opts = {
-      stunServers: o.stunServers ?? ['stun:stun.l.google.com:19302'],
-      turnServers: o.turnServers ?? [],
-      iceTransportPolicy: o.iceTransportPolicy ?? 'all',
-      dataChannelOrdered: o.dataChannelOrdered ?? true,
+      stunServers:              o.stunServers ?? ['stun:stun.l.google.com:19302'],
+      turnServers:              o.turnServers ?? [],
+      iceTransportPolicy:       o.iceTransportPolicy ?? 'all',
+      dataChannelOrdered:       o.dataChannelOrdered ?? true,
       dataChannelMaxRetransmits: o.dataChannelMaxRetransmits,
-      useMediaChannels: o.useMediaChannels ?? true,
-      mediaChannelJpegQuality: o.mediaChannelJpegQuality ?? 80,
+      useMediaChannels:         o.useMediaChannels ?? true,
+      mediaChannelJpegQuality:  o.mediaChannelJpegQuality ?? 80,
     }
+    this._videoTopics = [...(o.videoTopics ?? [])]
+    this._audioTopics = [...(o.audioTopics ?? [])]
 
     Logger.debug(`WebRtcConnection: peerId=${this._peerId}, sessionId=${this.sessionId}`)
   }
@@ -130,9 +170,11 @@ export class WebRtcConnection {
    *
    * Example:
    *   const conn = await WebRtcConnection.withMqtt(
-   *     'wss://broker.hivemq.com:8884/mqtt', 'my-robot'
+   *     'wss://broker.hivemq.com:8884/mqtt', 'my-robot',
+   *     { webrtcOptions: { videoTopics: ['/camera/color/image'] } }
    *   )
    *   await conn.connect(30)
+   *   const track = await conn.receiveVideoTrack('/camera/color/image')
    */
   static async withMqtt(
     brokerUrl: string,
@@ -160,35 +202,91 @@ export class WebRtcConnection {
 
   get peerId(): string { return this._peerId }
   get isConnected(): boolean { return this._connected }
-  /** True if a native video media track was established with the remote peer. */
-  get videoNegotiated(): boolean { return this._videoNegotiated }
-  /** True if a native audio media track was established with the remote peer. */
-  get audioNegotiated(): boolean { return this._audioNegotiated }
   /** Whether native WebRTC media tracks are used for video/audio (vs data channel). */
   get useMediaChannels(): boolean { return this._opts.useMediaChannels }
-  /** Last received remote video track, or null if none has arrived yet. */
-  get videoTrack(): MediaStreamTrack | null { return this._lastVideoTrack }
-  /** Last received remote audio track, or null if none has arrived yet. */
-  get audioTrack(): MediaStreamTrack | null { return this._lastAudioTrack }
   /** JPEG quality (1–100) used when compressing frames sent over the data channel. */
-  get mediaChannelJpegQuality(): number { return this._opts.mediaChannelJpegQuality ?? 80 }
+  get mediaChannelJpegQuality(): number { return this._opts.mediaChannelJpegQuality }
+  /** Own video topic paths (declared in options or via sendVideoTrack/receiveVideoTrack). */
+  get videoTopics(): readonly string[] { return this._videoTopics }
+  /** Own audio topic paths (declared in options or via sendAudioTrack/receiveAudioTrack). */
+  get audioTopics(): readonly string[] { return this._audioTopics }
+
+  /** True if the RTP video track for this topic was negotiated with the remote peer. */
+  isVideoNegotiated(topic: string): boolean { return this._videoNegotiated.has(topic) }
+  /** True if the RTP audio track for this topic was negotiated with the remote peer. */
+  isAudioNegotiated(topic: string): boolean { return this._audioNegotiated.has(topic) }
+
+  // ---- Media send API (call before connect()) -----------------------------
 
   /**
-   * Add a local video track to be sent to the remote peer.
-   * Must be called before connect().
+   * Register a local video track to send to the remote peer on the given topic.
    * Obtain a track from getUserMedia() or HTMLCanvasElement.captureStream().
+   * Must be called before connect().
+   *
+   * @param track  Native browser MediaStreamTrack (kind = 'video').
+   * @param topic  The topic path this track is published on (e.g. '/camera/color/image').
    */
-  setLocalVideoTrack(track: MediaStreamTrack): void {
-    this._localVideoTrack = track
+  sendVideoTrack(track: MediaStreamTrack, topic: string): void {
+    if (!this._videoTopics.includes(topic)) this._videoTopics.push(topic)
+    this._localVideoTracks.set(topic, track)
+    Logger.debug(`WebRtcConnection: sendVideoTrack registered for '${topic}'`)
   }
 
   /**
-   * Add a local audio track to be sent to the remote peer.
+   * Register a local audio track to send to the remote peer on the given topic.
    * Must be called before connect().
+   *
+   * @param track  Native browser MediaStreamTrack (kind = 'audio').
+   * @param topic  The topic path this track is published on (e.g. '/mic/audio/stream').
    */
-  setLocalAudioTrack(track: MediaStreamTrack): void {
-    this._localAudioTrack = track
+  sendAudioTrack(track: MediaStreamTrack, topic: string): void {
+    if (!this._audioTopics.includes(topic)) this._audioTopics.push(topic)
+    this._localAudioTracks.set(topic, track)
+    Logger.debug(`WebRtcConnection: sendAudioTrack registered for '${topic}'`)
   }
+
+  // ---- Media receive API --------------------------------------------------
+
+  /**
+   * Return a Promise that resolves with the remote MediaStreamTrack for the
+   * given video topic once it arrives (or immediately if already received).
+   *
+   * Calling this before connect() also registers the topic for SDP negotiation
+   * (equivalent to including it in WebRtcOptions.videoTopics).
+   *
+   * Attach the resolved track to a <video> element:
+   *   const track = await conn.receiveVideoTrack('/camera/color/image')
+   *   videoEl.srcObject = new MediaStream([track])
+   */
+  receiveVideoTrack(topic: string): Promise<MediaStreamTrack> {
+    if (!this._videoTopics.includes(topic)) this._videoTopics.push(topic)
+    const existing = this._receivedVideoTracks.get(topic)
+    if (existing) return Promise.resolve(existing)
+    return new Promise<MediaStreamTrack>((resolve) => {
+      if (!this._videoTrackWaiters.has(topic)) this._videoTrackWaiters.set(topic, [])
+      this._videoTrackWaiters.get(topic)!.push(resolve)
+    })
+  }
+
+  /**
+   * Return a Promise that resolves with the remote MediaStreamTrack for the
+   * given audio topic once it arrives (or immediately if already received).
+   *
+   * Attach the resolved track to an <audio> element:
+   *   const track = await conn.receiveAudioTrack('/mic/audio/stream')
+   *   audioEl.srcObject = new MediaStream([track])
+   */
+  receiveAudioTrack(topic: string): Promise<MediaStreamTrack> {
+    if (!this._audioTopics.includes(topic)) this._audioTopics.push(topic)
+    const existing = this._receivedAudioTracks.get(topic)
+    if (existing) return Promise.resolve(existing)
+    return new Promise<MediaStreamTrack>((resolve) => {
+      if (!this._audioTrackWaiters.has(topic)) this._audioTrackWaiters.set(topic, [])
+      this._audioTrackWaiters.get(topic)!.push(resolve)
+    })
+  }
+
+  // ---- Connection lifecycle -----------------------------------------------
 
   /**
    * Initiate the WebRTC handshake and wait until the peer connection is
@@ -269,40 +367,6 @@ export class WebRtcConnection {
   }
 
   /**
-   * Register a callback that fires when a remote video track arrives.
-   * The callback receives a live MediaStreamTrack; attach it to a <video>
-   * element via: videoElement.srcObject = new MediaStream([track])
-   */
-  addVideoCallback(callback: VideoCallback): void {
-    this._videoCallbacks.push(callback)
-    if (this._lastVideoTrack !== null) {
-      try { callback(this._lastVideoTrack) } catch (e) {
-        Logger.warning(`WebRtcConnection(${this._peerId}): video callback error: ${e}`)
-      }
-    }
-  }
-
-  removeVideoCallback(callback: VideoCallback): void {
-    this._videoCallbacks = this._videoCallbacks.filter(cb => cb !== callback)
-  }
-
-  /**
-   * Register a callback that fires when a remote audio track arrives.
-   */
-  addAudioCallback(callback: AudioCallback): void {
-    this._audioCallbacks.push(callback)
-    if (this._lastAudioTrack !== null) {
-      try { callback(this._lastAudioTrack) } catch (e) {
-        Logger.warning(`WebRtcConnection(${this._peerId}): audio callback error: ${e}`)
-      }
-    }
-  }
-
-  removeAudioCallback(callback: AudioCallback): void {
-    this._audioCallbacks = this._audioCallbacks.filter(cb => cb !== callback)
-  }
-
-  /**
    * Serialize msg as msgpack and send it on the data channel.
    * Silently drops the message if the channel is not open yet.
    */
@@ -318,7 +382,6 @@ export class WebRtcConnection {
 
   /**
    * Send a video or audio frame on the magpie-media unreliable data channel.
-   * Use when the remote peer does not support media tracks (e.g. the C++ port).
    * msg should be: { kind: 'video'|'audio', topic: string, payload: <frame-dict> }
    */
   sendMediaFrame(msg: unknown): void {
@@ -332,9 +395,8 @@ export class WebRtcConnection {
   }
 
   /**
-   * Enqueue a pre-serialized media frame for sending via the reliable data channel.
-   * Used when useMediaChannels=false. Drop-stale: only the latest pending frame is kept,
-   * so a slow consumer never accumulates a backlog of stale video frames.
+   * Enqueue a pre-serialized media frame for drop-stale sending via the reliable
+   * data channel. Used when useMediaChannels=false.
    */
   enqueueMediaSend(payload: Uint8Array): void {
     this._pendingMediaSend = payload
@@ -369,7 +431,7 @@ export class WebRtcConnection {
 
   private async _connectInner(): Promise<void> {
     const iceServers: RTCIceServer[] = this._opts.stunServers.map(url => ({ urls: url }))
-    for (const turn of this._opts.turnServers as WebRtcTurnServer[]) {
+    for (const turn of this._opts.turnServers) {
       iceServers.push({ urls: turn.url, username: turn.username, credential: turn.credential })
     }
 
@@ -387,9 +449,10 @@ export class WebRtcConnection {
 
       if (state === 'connected') {
         this._connected = true
-        // _resolveConnect(true) is called from _setupDataChannel's onopen,
-        // matching Python behaviour: connect() only resolves once the data
-        // channel is ready to send (not just when ICE is established).
+        // Mark all union topics as negotiated (mirrors Python's on_connectionstatechange)
+        for (const t of this._unionVideoTopics) this._videoNegotiated.add(t)
+        for (const t of this._unionAudioTopics) this._audioNegotiated.add(t)
+        // _resolveConnect(true) is called from _setupDataChannel's onopen
       } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
         this._connected = false
         this._resolveConnect(false)
@@ -419,35 +482,40 @@ export class WebRtcConnection {
         this._dataChannel = event.channel
         this._setupDataChannel(event.channel)
       } else if (event.channel.label === 'magpie-media' && this._opts.useMediaChannels) {
-        // magpie-media is only used as fallback when useMediaChannels=true
         this._mediaChannel = event.channel
         this._setupMediaChannel(event.channel)
       }
     }
 
+    // ontrack fires in m-line order: audio topics first (in union order), then video topics.
+    // Index counters map each event to the correct topic.
     pc.ontrack = (event) => {
       const track = event.track
       if (track.kind === 'video') {
-        // Only set negotiated when we actually sent a local video track (publisher side)
-        if (this._opts.useMediaChannels && this._localVideoTrack !== null) {
-          this._videoNegotiated = true
+        const topic = this._unionVideoTopics[this._videoTrackIdx++]
+        if (!topic) {
+          Logger.warning(`WebRtcConnection(${this._peerId}): unexpected video track (idx=${this._videoTrackIdx - 1})`)
+          return
         }
-        this._lastVideoTrack = track
-        for (const cb of [...this._videoCallbacks]) {
-          try { cb(track) } catch (e) {
-            Logger.warning(`WebRtcConnection(${this._peerId}): video callback error: ${e}`)
-          }
+        Logger.debug(`WebRtcConnection(${this._peerId}): video track arrived for '${topic}'`)
+        this._receivedVideoTracks.set(topic, track)
+        const waiters = this._videoTrackWaiters.get(topic) ?? []
+        this._videoTrackWaiters.delete(topic)
+        for (const resolve of waiters) {
+          try { resolve(track) } catch (_) { /* ignore */ }
         }
       } else if (track.kind === 'audio') {
-        // Only set negotiated when we actually sent a local audio track (publisher side)
-        if (this._opts.useMediaChannels && this._localAudioTrack !== null) {
-          this._audioNegotiated = true
+        const topic = this._unionAudioTopics[this._audioTrackIdx++]
+        if (!topic) {
+          Logger.warning(`WebRtcConnection(${this._peerId}): unexpected audio track (idx=${this._audioTrackIdx - 1})`)
+          return
         }
-        this._lastAudioTrack = track
-        for (const cb of [...this._audioCallbacks]) {
-          try { cb(track) } catch (e) {
-            Logger.warning(`WebRtcConnection(${this._peerId}): audio callback error: ${e}`)
-          }
+        Logger.debug(`WebRtcConnection(${this._peerId}): audio track arrived for '${topic}'`)
+        this._receivedAudioTracks.set(topic, track)
+        const waiters = this._audioTrackWaiters.get(topic) ?? []
+        this._audioTrackWaiters.delete(topic)
+        for (const resolve of waiters) {
+          try { resolve(track) } catch (_) { /* ignore */ }
         }
       }
     }
@@ -461,7 +529,12 @@ export class WebRtcConnection {
     const tick = () => {
       if (this._closing) return
 
-      this._sendSignal({ type: 'hello', peer_id: this._peerId })
+      this._sendSignal({
+        type: 'hello',
+        peer_id: this._peerId,
+        video_topics: this._videoTopics,
+        audio_topics: this._audioTopics,
+      })
       count++
 
       if (this._remotePeerId !== null) return  // peer found, stop
@@ -495,33 +568,50 @@ export class WebRtcConnection {
     this._dataChannel = dc
     this._setupDataChannel(dc)
 
-    // magpie-media unreliable DC only when useMediaChannels=true (RTP fallback).
-    // When useMediaChannels=false, video/audio goes through the reliable magpie DC.
     if (this._opts.useMediaChannels) {
       const mediaDc = pc.createDataChannel('magpie-media', { ordered: false, maxRetransmits: 0 })
       this._mediaChannel = mediaDc
       this._setupMediaChannel(mediaDc)
     }
 
-    // Add local media tracks or recvonly transceivers only if media channels enabled
+    // Compute union: own topics + remote-only topics not already in own
+    const unionAudio = _unionTopics(this._audioTopics, this._remoteAudioTopics)
+    const unionVideo = _unionTopics(this._videoTopics, this._remoteVideoTopics)
+    this._unionAudioTopics = unionAudio
+    this._unionVideoTopics = unionVideo
+
+    // Add transceivers: audio topics first (in union order), then video.
+    // This order must match what the answerer expects for index-based ontrack mapping.
     if (this._opts.useMediaChannels) {
-      if (this._localVideoTrack) {
-        pc.addTrack(this._localVideoTrack)
-      } else {
-        pc.addTransceiver('video', { direction: 'recvonly' })
+      for (const topic of unionAudio) {
+        const track = this._localAudioTracks.get(topic)
+        if (track) {
+          pc.addTrack(track)
+        } else {
+          pc.addTransceiver('audio', { direction: 'recvonly' })
+        }
       }
-      if (this._localAudioTrack) {
-        pc.addTrack(this._localAudioTrack)
-      } else {
-        pc.addTransceiver('audio', { direction: 'recvonly' })
+      for (const topic of unionVideo) {
+        const track = this._localVideoTracks.get(topic)
+        if (track) {
+          pc.addTrack(track)
+        } else {
+          pc.addTransceiver('video', { direction: 'recvonly' })
+        }
       }
     }
 
     const offer = await pc.createOffer()
     await pc.setLocalDescription(offer)
 
-    this._sendSignal({ type: 'offer', peer_id: this._peerId, sdp: pc.localDescription!.sdp })
-    Logger.debug(`WebRtcConnection(${this._peerId}): SDP offer sent.`)
+    this._sendSignal({
+      type: 'offer',
+      peer_id: this._peerId,
+      sdp: pc.localDescription!.sdp,
+      audio_topics: unionAudio,
+      video_topics: unionVideo,
+    })
+    Logger.debug(`WebRtcConnection(${this._peerId}): SDP offer sent (audio=${unionAudio.length}, video=${unionVideo.length}).`)
   }
 
   // ---- Private: data channel ----------------------------------------------
@@ -575,23 +665,23 @@ export class WebRtcConnection {
     }
   }
 
+  // magpie-media fallback: route to pub callbacks by topic so WebRtcSubscriber
+  // handles these frames the same way as data-channel frames.
   private _routeMediaMessage(msg: unknown): void {
-    // magpie-media is the fallback path when useMediaChannels=true but RTP was
-    // not fully negotiated (e.g. connecting to a C++ peer).  Subscribers that
-    // registered for VIDEO_TOPIC / AUDIO_TOPIC via addVideoCallback /
-    // addAudioCallback receive these frames.
     if (!msg || typeof msg !== 'object') return
     const m = msg as Record<string, unknown>
     const kind = m['kind'] as string | undefined
     const payload = m['payload']
+    const topic = (m['topic'] as string | undefined) ?? ''
 
-    if ((kind !== 'video' && kind !== 'audio') || !payload || typeof payload !== 'object') return
+    if ((kind !== 'video' && kind !== 'audio') || !payload || typeof payload !== 'object' || !topic) return
 
-    const topic = (m['topic'] as string | undefined) || kind
-    const callbacks = kind === 'video' ? [...this._videoCallbacks] : [...this._audioCallbacks]
-    for (const cb of callbacks) {
-      try { cb(payload as Record<string, unknown>) } catch (e) {
-        Logger.warning(`WebRtcConnection: media ${kind} callback error (topic='${topic}'): ${e}`)
+    const callbacks = this._pubCallbacks.get(topic)
+    if (callbacks) {
+      for (const cb of [...callbacks]) {
+        try { cb(payload, topic) } catch (e) {
+          Logger.warning(`WebRtcConnection: media channel callback error for '${topic}': ${e}`)
+        }
       }
     }
   }
@@ -624,7 +714,8 @@ export class WebRtcConnection {
       }
 
     } else if (msgType === 'media') {
-      // Video/audio frame routed via reliable data channel (useMediaChannels=false path)
+      // Video/audio frame routed via reliable data channel (useMediaChannels=false path).
+      // Route to pub callbacks by topic — same as regular pub messages.
       const topic = (m['topic'] as string | undefined) ?? ''
       const payload = m['payload']
       if (!topic || !payload || typeof payload !== 'object') return
@@ -683,12 +774,18 @@ export class WebRtcConnection {
     const msgType = msg['type'] as string
     const remotePeerId = (msg['peer_id'] as string | undefined) ?? ''
 
-    // ---- hello: remote peer announces presence ----------------------------
+    // ---- hello: remote peer announces presence with topic lists ---------------
     if (msgType === 'hello') {
+      const remoteVideoTopics = (msg['video_topics'] as string[] | undefined) ?? []
+      const remoteAudioTopics = (msg['audio_topics'] as string[] | undefined) ?? []
+
       if (this._remotePeerId === null) {
         this._remotePeerId = remotePeerId
         Logger.debug(`WebRtcConnection(${this._peerId}): remote peer = ${remotePeerId}`)
       }
+      // Always update remote topics (they may arrive before role decision)
+      this._remoteVideoTopics = remoteVideoTopics
+      this._remoteAudioTopics = remoteAudioTopics
 
       if (!this._roleDecided) {
         this._roleDecided = true
@@ -699,22 +796,49 @@ export class WebRtcConnection {
           Logger.debug(`WebRtcConnection(${this._peerId}): role = answer`)
           // Reply immediately so the offerer can detect us even if it
           // subscribed after we stopped broadcasting hellos.
-          this._sendSignal({ type: 'hello', peer_id: this._peerId })
+          this._sendSignal({
+            type: 'hello',
+            peer_id: this._peerId,
+            video_topics: this._videoTopics,
+            audio_topics: this._audioTopics,
+          })
         }
       }
 
-    // ---- offer: remote peer sent SDP offer --------------------------------
+    // ---- offer: remote peer sent SDP offer with topic lists ------------------
     } else if (msgType === 'offer') {
       if (this._remotePeerId === null) this._remotePeerId = remotePeerId
 
       const sdp = (msg['sdp'] as string | undefined) ?? ''
-      Logger.debug(`WebRtcConnection(${this._peerId}): received SDP offer.`)
+      const offerAudioTopics = (msg['audio_topics'] as string[] | undefined) ?? []
+      const offerVideoTopics = (msg['video_topics'] as string[] | undefined) ?? []
+
+      Logger.debug(`WebRtcConnection(${this._peerId}): received SDP offer (audio=${offerAudioTopics.length}, video=${offerVideoTopics.length}).`)
+
+      this._remoteAudioTopics = offerAudioTopics
+      this._remoteVideoTopics = offerVideoTopics
+
+      // Compute union for ontrack index mapping
+      const unionAudio = _unionTopics(this._audioTopics, offerAudioTopics)
+      const unionVideo = _unionTopics(this._videoTopics, offerVideoTopics)
+      this._unionAudioTopics = unionAudio
+      this._unionVideoTopics = unionVideo
 
       const pc = this._pc!
-      // Add local tracks before setting remote description (only if media channels enabled)
+
+      // Add local tracks BEFORE setRemoteDescription so the browser
+      // matches them to the offer's m-lines. Only add for topics where
+      // we have a local track — answerer does not call addTransceiver
+      // (the offer's m-lines already define the transceivers).
       if (this._opts.useMediaChannels) {
-        if (this._localVideoTrack) pc.addTrack(this._localVideoTrack)
-        if (this._localAudioTrack) pc.addTrack(this._localAudioTrack)
+        for (const topic of unionAudio) {
+          const track = this._localAudioTracks.get(topic)
+          if (track) pc.addTrack(track)
+        }
+        for (const topic of unionVideo) {
+          const track = this._localVideoTracks.get(topic)
+          if (track) pc.addTrack(track)
+        }
       }
 
       await pc.setRemoteDescription({ sdp, type: 'offer' })
@@ -723,17 +847,23 @@ export class WebRtcConnection {
       const answer = await pc.createAnswer()
       await pc.setLocalDescription(answer)
 
-      this._sendSignal({ type: 'answer', peer_id: this._peerId, sdp: pc.localDescription!.sdp })
+      this._sendSignal({
+        type: 'answer',
+        peer_id: this._peerId,
+        sdp: pc.localDescription!.sdp,
+        audio_topics: unionAudio,
+        video_topics: unionVideo,
+      })
       Logger.debug(`WebRtcConnection(${this._peerId}): SDP answer sent.`)
 
-    // ---- answer: remote peer sent SDP answer ------------------------------
+    // ---- answer: remote peer sent SDP answer ---------------------------------
     } else if (msgType === 'answer') {
       const sdp = (msg['sdp'] as string | undefined) ?? ''
       Logger.debug(`WebRtcConnection(${this._peerId}): received SDP answer.`)
       await this._pc!.setRemoteDescription({ sdp, type: 'answer' })
       await this._flushPendingIce()
 
-    // ---- candidate: trickle ICE candidate ---------------------------------
+    // ---- candidate: trickle ICE candidate ------------------------------------
     } else if (msgType === 'candidate') {
       const candidateStr = (msg['candidate'] as string | undefined) ?? ''
       if (!candidateStr) return
@@ -775,8 +905,19 @@ export class WebRtcConnection {
     if (this._pc) { this._pc.close(); this._pc = null }
     this._dataChannel = null
     this._mediaChannel = null
-    this._videoNegotiated = false
-    this._audioNegotiated = false
+
+    // Reset per-negotiation state — preserve local tracks, topic lists, and
+    // pending receiveVideoTrack/receiveAudioTrack waiters across reconnection.
+    this._videoNegotiated.clear()
+    this._audioNegotiated.clear()
+    this._receivedVideoTracks.clear()
+    this._receivedAudioTracks.clear()
+    this._unionVideoTopics = []
+    this._unionAudioTopics = []
+    this._remoteVideoTopics = []
+    this._remoteAudioTopics = []
+    this._videoTrackIdx = 0
+    this._audioTrackIdx = 0
     this._remotePeerId = null
     this._roleDecided = false
     this._pendingIceCandidates = []

@@ -347,31 +347,65 @@ server.onRequest((request) => {
 
 ### WebRTC Video and Audio (browser)
 
-When the remote Python peer sends a video or audio stream, receive it as a native `MediaStreamTrack` using the special sentinel topics `WebRtcSubscriber.VIDEO_TOPIC` and `WebRtcSubscriber.AUDIO_TOPIC`.
+Declare which topic paths carry video/audio in `WebRtcOptions`, then use `receiveVideoTrack(topic)` / `receiveAudioTrack(topic)` to obtain native `MediaStreamTrack` objects. Each call returns a `Promise` that resolves when the remote peer's track arrives (or immediately if it already has).
 
 ```javascript
-import { WebRtcConnection, WebRtcSubscriber } from '@luxai-qtrobot/magpie'
+import { WebRtcConnection } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
-
-// Create subscribers before connect() to avoid missing early tracks
-const videoSub = new WebRtcSubscriber(conn, WebRtcSubscriber.VIDEO_TOPIC)
-const audioSub = new WebRtcSubscriber(conn, WebRtcSubscriber.AUDIO_TOPIC)
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot', {
+  webrtcOptions: {
+    videoTopics: ['/camera/color/image'],   // each entry = one RTP video track
+    audioTopics: ['/mic/audio/stream'],     // each entry = one RTP audio track
+  },
+})
 
 await conn.connect(60)
 
-// Wait for the video track and attach it to a <video> element
-const [videoTrack] = await videoSub.read(60)
+// Receive the video track and attach it to a <video> element
+const videoTrack = await conn.receiveVideoTrack('/camera/color/image')
 const videoEl = document.getElementById('video-el')
 videoEl.srcObject = new MediaStream([videoTrack])
 await videoEl.play()
 
-// Wait for the audio track and add it to the same stream
-const [audioTrack] = await audioSub.read(60)
-videoEl.srcObject.addTrack(audioTrack)
+// Receive the audio track
+const audioTrack = await conn.receiveAudioTrack('/mic/audio/stream')
+const audioEl = new Audio()
+audioEl.srcObject = new MediaStream([audioTrack])
+// unmute on user interaction to satisfy browser autoplay policy
+```
+
+Multiple tracks work exactly the same way — just add more topics and call `receiveVideoTrack`/`receiveAudioTrack` for each:
+
+```javascript
+const conn = await WebRtcConnection.withMqtt('wss://broker:8884/mqtt', 'my-robot', {
+  webrtcOptions: {
+    videoTopics: ['/camera/color/image', '/camera/depth/image'],
+    audioTopics: ['/mic/audio/stream'],
+  },
+})
+await conn.connect(60)
+
+const colorTrack = await conn.receiveVideoTrack('/camera/color/image')
+const depthTrack = await conn.receiveVideoTrack('/camera/depth/image')
+const audioTrack = await conn.receiveAudioTrack('/mic/audio/stream')
+```
+
+For sending local video/audio to the remote peer (browser as publisher):
+
+```javascript
+// Obtain browser camera/mic tracks
+const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+
+// Register tracks before connect()
+conn.sendVideoTrack(stream.getVideoTracks()[0], '/camera/color/image')
+conn.sendAudioTrack(stream.getAudioTracks()[0], '/mic/audio/stream')
+
+await conn.connect(60)
 ```
 
 > **Autoplay policy:** Browsers mute autoplay by default. Set `<video muted>` initially and unmute on user interaction (e.g. a button click) to comply with browser autoplay policies.
+
+> **Python tool topics:** The Python `magpie-video-capture-webrtc` and `magpie-audio-capture-webrtc` tools default to topic `"video"` and `"audio"` respectively. Pass the matching topic to `receiveVideoTrack`/`receiveAudioTrack` or set it explicitly with the `--topic` argument on the Python side.
 
 ---
 
@@ -392,10 +426,14 @@ const conn = await WebRtcConnection.withMqtt(
         { url: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' }
       ],
       iceTransportPolicy: 'relay',   // force TURN relay (firewall-friendly)
+      videoTopics: ['/camera/color/image', '/camera/depth/image'],  // RTP video tracks
+      audioTopics: ['/mic/audio/stream'],                           // RTP audio tracks
     },
   }
 )
 ```
+
+Topics can also be registered at runtime via `sendVideoTrack`/`receiveVideoTrack` before `connect()` — they are added to the topic lists automatically.
 
 ---
 

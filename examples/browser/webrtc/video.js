@@ -1,14 +1,11 @@
 /* global Magpie */
 const { WebRtcConnection, WebRtcSubscriber } = Magpie
 
-let conn        = null
-let videoSub    = null
-let audioSub    = null
-let dataSub     = null
-let dataActive  = false
-let muted       = true
-let audioTrack  = null
-let audioEl     = null   // dedicated Audio element, avoids stalled-video-track issue
+let conn       = null
+let dataSub    = null
+let dataActive = false
+let muted      = true
+let audioEl    = null   // dedicated Audio element, avoids stalled-video-track issue
 
 const videoEl = () => document.getElementById('video-el')
 
@@ -49,9 +46,11 @@ function setStatus(state, detail) {
 async function toggleConnect() {
   if (conn) { await cleanup(); return }
 
-  const broker    = document.getElementById('broker-uri').value.trim()
-  const sessionId = document.getElementById('session-id').value.trim()
-  const noStun    = document.getElementById('no-stun').checked
+  const broker     = document.getElementById('broker-uri').value.trim()
+  const sessionId  = document.getElementById('session-id').value.trim()
+  const videoTopic = document.getElementById('video-topic').value.trim() || 'video'
+  const audioTopic = document.getElementById('audio-topic').value.trim() || 'audio'
+  const noStun     = document.getElementById('no-stun').checked
 
   if (!broker || !sessionId) { alert('Please enter broker URL and session ID.'); return }
 
@@ -60,7 +59,11 @@ async function toggleConnect() {
   try {
     conn = await WebRtcConnection.withMqtt(broker, sessionId, {
       reconnect: true,
-      webrtcOptions: noStun ? { stunServers: [] } : undefined,
+      webrtcOptions: {
+        ...(noStun ? { stunServers: [] } : {}),
+        videoTopics: [videoTopic],
+        audioTopics: [audioTopic],
+      },
     })
   } catch (err) {
     alert(`Broker connection failed: ${err.message}`)
@@ -68,10 +71,6 @@ async function toggleConnect() {
     setStatus('disconnected')
     return
   }
-
-  // Set up subscribers before connect() so we don't miss early tracks
-  videoSub = new WebRtcSubscriber(conn, WebRtcSubscriber.VIDEO_TOPIC)
-  audioSub = new WebRtcSubscriber(conn, WebRtcSubscriber.AUDIO_TOPIC)
 
   setStatus('connecting', 'Waiting for peer…')
   const ok = await conn.connect(60)
@@ -88,23 +87,21 @@ async function toggleConnect() {
 
   setStatus('connected')
 
-  // Wait for video and audio tracks asynchronously
-  waitForVideo()
-  waitForAudio()
+  // receiveVideoTrack / receiveAudioTrack return Promise<MediaStreamTrack>.
+  // They resolve immediately if the track already arrived, or wait until
+  // the remote peer sends the track — no polling or subscribers needed.
+  waitForVideo(videoTopic)
+  waitForAudio(audioTopic)
 }
 
 async function cleanup() {
-  if (dataActive)  { dataSub?.close(); dataSub = null; dataActive = false }
-  videoSub?.close(); videoSub = null
-  audioSub?.close(); audioSub = null
+  if (dataActive) { dataSub?.close(); dataSub = null; dataActive = false }
   if (conn) { await conn.disconnect(); conn = null }
 
-  // Reset video
   const v = videoEl()
   v.srcObject = null
-  audioTrack  = null
-  muted       = true
-  v.muted     = true
+  muted = true
+  v.muted = true
   if (audioEl) { audioEl.pause(); audioEl.srcObject = null; audioEl = null }
 
   document.getElementById('video-placeholder').classList.remove('hidden')
@@ -120,9 +117,9 @@ async function cleanup() {
 
 // ── Video track ───────────────────────────────────────────────────────────────
 
-async function waitForVideo() {
+async function waitForVideo(topic) {
   try {
-    const [track] = await videoSub.read(60)       // wait up to 60 s
+    const track = await conn.receiveVideoTrack(topic)
     const v = videoEl()
     v.srcObject = new MediaStream([track])
 
@@ -131,14 +128,13 @@ async function waitForVideo() {
       document.getElementById('video-badge').style.display = 'inline'
       updateResBadge(v)
     }
-
     v.onresize = () => updateResBadge(v)
 
     await v.play().catch(() => {
       // Autoplay blocked — user must interact first; unmute button will trigger play
     })
   } catch {
-    // Subscriber closed or connection dropped — no video track received
+    // Connection dropped before track arrived
   }
 }
 
@@ -152,36 +148,26 @@ function updateResBadge(v) {
 
 // ── Audio track ───────────────────────────────────────────────────────────────
 
-async function waitForAudio() {
+async function waitForAudio(topic) {
   try {
-    console.log('[audio] waitForAudio: waiting for audio track...')
-    const [track] = await audioSub.read(60)
-    audioTrack = track
-    console.log('[audio] track received — kind:', track.kind, 'readyState:', track.readyState, 'enabled:', track.enabled, 'muted:', track.muted)
-    appendLog('audio-log', `Audio track received (readyState=${track.readyState}, muted=${track.muted}) — click Unmute to hear it.`)
+    console.log('[audio] waiting for audio track on topic:', topic)
+    const track = await conn.receiveAudioTrack(topic)
+    console.log('[audio] track received — kind:', track.kind, 'readyState:', track.readyState)
+    appendLog('audio-log', `Audio track received (readyState=${track.readyState}) — click Unmute to hear it.`)
 
-    // Monitor RTP lifecycle — muted=true means no RTP yet; unmute fires when data arrives
     track.onunmute = () => {
       console.log('[audio] track UNMUTED — RTP is now flowing!')
       appendLog('audio-log', 'Audio RTP flowing (track unmuted).')
     }
-    track.onmute = () => {
-      console.log('[audio] track MUTED — RTP stopped.')
-      appendLog('audio-log', 'Audio RTP stopped (track muted).', true)
-    }
-    track.onended = () => {
-      console.log('[audio] track ENDED.')
-      appendLog('audio-log', 'Audio track ended.', true)
-    }
+    track.onmute  = () => appendLog('audio-log', 'Audio RTP stopped (track muted).', true)
+    track.onended = () => appendLog('audio-log', 'Audio track ended.', true)
 
-    // Use a dedicated <audio> element so a stalled/empty video track
-    // cannot block audio playback (Chrome stalls <video> when video track has no RTP)
+    // Use a dedicated <audio> element so a stalled video track cannot block
+    // audio playback (Chrome stalls <video> when the video track has no RTP yet)
     audioEl = new Audio()
     audioEl.srcObject = new MediaStream([track])
     audioEl.muted = true   // start muted; user clicks Unmute to hear it
-    console.log('[audio] starting dedicated audio element...')
-    await audioEl.play().catch((e) => console.warn('[audio] audioEl.play() rejected:', e))
-    console.log('[audio] audioEl playing — paused:', audioEl.paused, 'muted:', audioEl.muted)
+    await audioEl.play().catch(e => console.warn('[audio] audioEl.play() rejected:', e))
   } catch (e) {
     console.error('[audio] waitForAudio error:', e)
     appendLog('audio-log', `Audio error: ${e?.message ?? e}`, true)
@@ -193,14 +179,12 @@ function toggleMute() {
   const btn = document.getElementById('btn-unmute')
   muted = !muted
   v.muted = muted
-  console.log('[audio] toggleMute: muted=', muted, 'v.srcObject tracks:', v.srcObject?.getTracks().map(t => `${t.kind}(${t.readyState})`))
   if (!muted) {
-    // Unmute the dedicated audio element (user gesture satisfies autoplay policy)
     if (audioEl) {
       audioEl.muted = false
-      audioEl.play().catch((e) => console.warn('[audio] audioEl.play() after unmute rejected:', e))
+      audioEl.play().catch(e => console.warn('[audio] play after unmute rejected:', e))
     }
-    v.play().catch((e) => console.warn('[audio] play() after unmute rejected:', e))
+    v.play().catch(() => {})
     btn.textContent = '🔇 Mute Audio'
     btn.className   = 'danger'
     appendLog('audio-log', 'Audio unmuted.')
