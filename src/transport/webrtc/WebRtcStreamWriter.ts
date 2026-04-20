@@ -15,7 +15,7 @@
  *   const conn = await WebRtcConnection.withMqtt('wss://broker:8884/mqtt', 'my-robot')
  *   await conn.connect(30)
  *
- *   const pub = new WebRtcPublisher(conn)
+ *   const pub = new WebRtcStreamWriter(conn)
  *   await pub.write({ motor: [0.1, 0.2] }, 'robot/cmd')
  *   pub.close()
  *   await conn.disconnect()
@@ -26,18 +26,18 @@ import { Logger } from '../../utils/logger'
 import { WebRtcConnection } from './WebRtcConnection'
 
 
-export class WebRtcPublisher extends StreamWriter {
+export class WebRtcStreamWriter extends StreamWriter {
   private readonly _connection: WebRtcConnection
 
   constructor(connection: WebRtcConnection) {
     super()
     this._connection = connection
-    Logger.debug('WebRtcPublisher: ready.')
+    Logger.debug('WebRtcStreamWriter: ready.')
   }
 
   async write(data: unknown, topic: string): Promise<void> {
     if (!topic) {
-      Logger.warning('WebRtcPublisher: write() called without a topic — message dropped.')
+      Logger.warning('WebRtcStreamWriter: write() called without a topic — message dropped.')
       return
     }
     this._connection.sendData({ type: 'pub', topic, payload: data })
@@ -45,6 +45,6 @@ export class WebRtcPublisher extends StreamWriter {
 
   close(): void {
     // Connection is shared; closing the publisher does NOT disconnect.
-    Logger.debug('WebRtcPublisher: closed.')
+    Logger.debug('WebRtcStreamWriter: closed.')
   }
 }

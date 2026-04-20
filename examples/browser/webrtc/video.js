@@ -1,5 +1,5 @@
 /* global Magpie */
-const { WebRtcConnection, WebRtcSubscriber } = Magpie
+const { WebRtcConnection, WebRtcStreamReader } = Magpie
 
 let conn       = null
 let dataSub    = null
@@ -214,7 +214,7 @@ function toggleSubscribe() {
   const topic = document.getElementById('data-topic').value.trim()
   if (!topic) return
 
-  dataSub    = new WebRtcSubscriber(conn, topic)
+  dataSub    = new WebRtcStreamReader(conn, topic)
   dataActive = true
   document.getElementById('btn-subscribe').textContent = 'Unsubscribe'
   document.getElementById('btn-subscribe').className   = 'danger'

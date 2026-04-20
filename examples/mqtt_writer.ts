@@ -1,21 +1,21 @@
 /**
- * MQTT Publisher example.
+ * MQTT Writer example.
  *
  * Publishes a message to a topic at 1 Hz using the free HiveMQ public test broker.
  * No account or credentials required.
  *
- * Usage (run together with mqtt_subscriber.ts or mqtt_subscriber.py):
- *   Terminal 1:  npm run example:publisher
- *   Terminal 2:  npm run example:subscriber
+ * Usage (run together with mqtt_reader.ts or mqtt_reader.py):
+ *   Terminal 1:  npm run example:writer
+ *   Terminal 2:  npm run example:reader
  *
- * Fully interoperable with examples/mqtt_subscriber.py from magpie (Python).
+ * Fully interoperable with examples/mqtt_reader.py from magpie (Python).
  */
 
-import { MqttConnection, MqttPublisher } from '../src'
+import { MqttConnection, MqttStreamWriter } from '../src'
 import { Logger } from '../src'
 
 const BROKER_URI = 'mqtt://broker.hivemq.com:1883' // wss://broker.hivemq.com:8884/mqtt
-const TOPIC      = 'magpie/examples/pubsub'
+const TOPIC      = 'magpie/examples/stream'
 
 async function main() {
   const conn = new MqttConnection(BROKER_URI, { clientId: 'magpie-js-pub-example' })
@@ -27,7 +27,7 @@ async function main() {
     process.exit(1)
   }
 
-  const pub = new MqttPublisher(conn)
+  const pub = new MqttStreamWriter(conn)
 
   let count = 1
 

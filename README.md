@@ -19,7 +19,7 @@
 
 ---
 
-MAGPIE.js is the TypeScript/JavaScript port of [MAGPIE](https://github.com/luxai-qtrobot/magpie) — a lightweight, transport-agnostic messaging engine for distributed systems. It provides clean abstractions for pub/sub streaming and request/response RPC, with two fully implemented transports: **MQTT** (browser + Node.js) and **WebRTC** (browser).
+MAGPIE.js is the TypeScript/JavaScript port of [MAGPIE](https://github.com/luxai-qtrobot/magpie) — a lightweight, transport-agnostic messaging engine for distributed systems. It provides clean abstractions for topic-based streaming and request/response RPC, with two fully implemented transports: **MQTT** (browser + Node.js) and **WebRTC** (browser).
 
 Designed for **full wire-level interoperability** with the Python (`luxai-magpie`) and C++ (`libmagpie`) implementations — a browser client can talk directly to a Python or C++ MAGPIE node with no adaptation layer.
 
@@ -27,10 +27,10 @@ Designed for **full wire-level interoperability** with the Python (`luxai-magpie
 
 ## Features
 
-- **Pub/Sub streaming** — topic-based messaging via `StreamWriter` / `StreamReader`
+- **Topic-based streaming** — topic-based messaging via `StreamWriter` / `StreamReader`
 - **Request/Response RPC** — async-native RPC via requester/responder pairs
-- **MQTT transport** — full pub/sub and RPC over MQTT; supports `mqtt://`, `mqtts://`, `ws://`, `wss://`, auth, LWT, and auto-reconnect
-- **WebRTC transport** — peer-to-peer pub/sub, RPC, video, and audio directly in the browser; uses MQTT as the signaling channel
+- **MQTT transport** — full streaming and RPC over MQTT; supports `mqtt://`, `mqtts://`, `ws://`, `wss://`, auth, LWT, and auto-reconnect
+- **WebRTC transport** — peer-to-peer streaming, RPC, video, and audio directly in the browser; uses MQTT as the signaling channel
 - **Pluggable transports** — same `StreamReader` / `StreamWriter` / `RpcRequester` / `RpcResponder` interfaces across all transports
 - **Fast serialization** — msgpack by default; bring your own serializer via the abstract interface
 - **Typed frames** — `DictFrame`, `ImageFrameJpeg`, `AudioFrameRaw`, and more — wire-compatible with Python
@@ -56,43 +56,43 @@ npm install @luxai-qtrobot/magpie
 All exports are available under the global `Magpie` object:
 
 ```js
-const { MqttConnection, MqttPublisher, MqttSubscriber, WebRtcConnection, WebRtcSubscriber } = Magpie
+const { MqttConnection, MqttStreamWriter, MqttStreamReader, WebRtcConnection, WebRtcStreamReader } = Magpie
 ```
 
 ---
 
 ## Quick Start — MQTT
 
-### Pub / Sub
+### Streaming
 
-**Publisher:**
+**Writer:**
 
 ```typescript
-import { MqttConnection, MqttPublisher } from '@luxai-qtrobot/magpie'
+import { MqttConnection, MqttStreamWriter } from '@luxai-qtrobot/magpie'
 
 const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
 await conn.connect()
 
-const pub = new MqttPublisher(conn)
-await pub.write({ sensor: 'temp', value: 22.5 }, 'sensors/temperature')
+const writer = new MqttStreamWriter(conn)
+await writer.write({ sensor: 'temp', value: 22.5 }, 'sensors/temperature')
 
-pub.close()
+writer.close()
 await conn.disconnect()
 ```
 
-**Subscriber:**
+**Reader:**
 
 ```typescript
-import { MqttConnection, MqttSubscriber, TimeoutError } from '@luxai-qtrobot/magpie'
+import { MqttConnection, MqttStreamReader, TimeoutError } from '@luxai-qtrobot/magpie'
 
 const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
 await conn.connect()
 
-const sub = new MqttSubscriber(conn, { topic: 'sensors/temperature' })
+const reader = new MqttStreamReader(conn, { topic: 'sensors/temperature' })
 
 while (true) {
   try {
-    const [data, topic] = await sub.read(5.0)
+    const [data, topic] = await reader.read(5.0)
     console.log(topic, data)
   } catch (err) {
     if (err instanceof TimeoutError) continue
@@ -100,7 +100,7 @@ while (true) {
   }
 }
 
-sub.close()
+reader.close()
 await conn.disconnect()
 ```
 
@@ -108,10 +108,10 @@ Wildcard topics are fully supported:
 
 ```typescript
 // single-level wildcard
-const sub = new MqttSubscriber(conn, { topic: 'sensors/+/temperature' })
+const reader = new MqttStreamReader(conn, { topic: 'sensors/+/temperature' })
 
 // multi-level wildcard
-const sub = new MqttSubscriber(conn, { topic: 'sensors/#' })
+const reader = new MqttStreamReader(conn, { topic: 'sensors/#' })
 ```
 
 ---
@@ -168,14 +168,14 @@ server.onRequest((request) => {
 </head>
 <body>
 <script>
-  const { MqttConnection, MqttPublisher, MqttSubscriber } = Magpie
+  const { MqttConnection, MqttStreamWriter, MqttStreamReader } = Magpie
 
   // Browsers require WebSocket — use ws:// or wss://
   const conn = new MqttConnection('wss://broker.hivemq.com:8884/mqtt')
   await conn.connect()
 
-  const pub = new MqttPublisher(conn)
-  await pub.write({ hello: 'from browser' }, 'magpie/test')
+  const writer = new MqttStreamWriter(conn)
+  await writer.write({ hello: 'from browser' }, 'magpie/test')
 </script>
 </body>
 </html>
@@ -224,7 +224,7 @@ await conn.connect()
 
 ## Quick Start — WebRTC
 
-WebRTC transport enables direct peer-to-peer communication between the browser and a Python or C++ MAGPIE node — with pub/sub messaging, RPC, and live video/audio streaming — all without routing data through a broker. MQTT is used only as the signaling channel to establish the WebRTC connection.
+WebRTC transport enables direct peer-to-peer communication between the browser and a Python or C++ MAGPIE node — with streaming, RPC, and live video/audio streaming — all without routing data through a broker. MQTT is used only as the signaling channel to establish the WebRTC connection.
 
 > **Browser only:** WebRTC uses native browser APIs (`RTCPeerConnection`). No extra dependencies are required, but this transport is not available in Node.js.
 
@@ -258,38 +258,36 @@ magpie-video-capture-webrtc \
 
 ---
 
-### WebRTC Pub / Sub
+### WebRTC Streaming
 
-Pub/sub over WebRTC uses a data channel. The API mirrors the MQTT transport exactly.
-
-**Publisher:**
+**Writer:**
 
 ```javascript
-import { WebRtcConnection, WebRtcPublisher } from '@luxai-qtrobot/magpie'
+import { WebRtcConnection, WebRtcStreamWriter } from '@luxai-qtrobot/magpie'
 
 const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
 await conn.connect(60)
 
-const pub = new WebRtcPublisher(conn)
-await pub.write({ action: 'greet', name: 'browser' }, 'magpie/demo')
+const writer = new WebRtcStreamWriter(conn)
+await writer.write({ action: 'greet', name: 'browser' }, 'magpie/demo')
 
-pub.close()
+writer.close()
 await conn.disconnect()
 ```
 
-**Subscriber:**
+**Reader:**
 
 ```javascript
-import { WebRtcConnection, WebRtcSubscriber, TimeoutError } from '@luxai-qtrobot/magpie'
+import { WebRtcConnection, WebRtcStreamReader, TimeoutError } from '@luxai-qtrobot/magpie'
 
 const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
 await conn.connect(60)
 
-const sub = new WebRtcSubscriber(conn, 'robot/state')
+const reader = new WebRtcStreamReader(conn, 'robot/state')
 
 while (true) {
   try {
-    const [data, topic] = await sub.read(5.0)
+    const [data, topic] = await reader.read(5.0)
     console.log(topic, data)
   } catch (err) {
     if (err instanceof TimeoutError) continue
@@ -297,7 +295,7 @@ while (true) {
   }
 }
 
-sub.close()
+reader.close()
 await conn.disconnect()
 ```
 
@@ -390,7 +388,7 @@ const depthTrack = await conn.receiveVideoTrack('/camera/depth/image')
 const audioTrack = await conn.receiveAudioTrack('/mic/audio/stream')
 ```
 
-For sending local video/audio to the remote peer (browser as publisher):
+For sending local video/audio to the remote peer (browser as writer):
 
 ```javascript
 // Obtain browser camera/mic tracks
@@ -444,12 +442,12 @@ Frames are typed message wrappers that carry standard metadata (`gid`, `id`, `na
 ```typescript
 import { DictFrame, ImageFrameJpeg, AudioFrameRaw, Frame } from '@luxai-qtrobot/magpie'
 
-// Create and publish a frame
+// Create and write a frame
 const frame = new DictFrame({ value: { count: 1, msg: 'hello' } })
-await pub.write(frame.toDict(), 'myrobot/data')
+await writer.write(frame.toDict(), 'myrobot/data')
 
 // Reconstruct a frame received from the wire
-const [raw, topic] = await sub.read()
+const [raw, topic] = await reader.read()
 const frame = Frame.fromDict(raw as Record<string, unknown>)
 // frame is automatically dispatched to the correct subclass (DictFrame, ImageFrameJpeg, etc.)
 ```
@@ -511,16 +509,16 @@ WebRTC signaling uses the same MQTT WebSocket connection; the actual peer-to-pee
 
 | Example | Description |
 |---|---|
-| [`examples/mqtt_publisher.ts`](examples/mqtt_publisher.ts) | Publish messages at 1 Hz |
-| [`examples/mqtt_subscriber.ts`](examples/mqtt_subscriber.ts) | Subscribe and print messages |
+| [`examples/mqtt_stream_writer.ts`](examples/mqtt_stream_writer.ts) | Write messages at 1 Hz |
+| [`examples/mqtt_stream_reader.ts`](examples/mqtt_stream_reader.ts) | Read and print messages |
 | [`examples/mqtt_requester.ts`](examples/mqtt_requester.ts) | Send RPC requests at 1 Hz |
 | [`examples/mqtt_responder.ts`](examples/mqtt_responder.ts) | Echo RPC responder |
 
 Run Node.js examples:
 
 ```bash
-npm run example:publisher
-npm run example:subscriber
+npm run example:writer
+npm run example:reader
 npm run example:requester
 npm run example:responder
 ```
@@ -529,8 +527,8 @@ npm run example:responder
 
 | Example | Description |
 |---|---|
-| [`examples/browser/demo.html`](examples/browser/demo.html) | MQTT interactive browser demo (pub/sub + RPC) |
-| [`examples/browser/webrtc/messaging.html`](examples/browser/webrtc/messaging.html) | WebRTC messaging demo (pub/sub + RPC over data channel) |
+| [`examples/browser/demo.html`](examples/browser/demo.html) | MQTT interactive browser demo (streaming + RPC) |
+| [`examples/browser/webrtc/messaging.html`](examples/browser/webrtc/messaging.html) | WebRTC messaging demo (streaming + RPC over data channel) |
 | [`examples/browser/webrtc/video.html`](examples/browser/webrtc/video.html) | WebRTC video viewer (live video + audio + data channel) |
 
 Build the bundle first, then open any demo directly in your browser:
@@ -555,22 +553,22 @@ src/
   serializer/       BaseSerializer, MsgpackSerializer
   frames/           Frame base + all frame types
   transport/
-    StreamReader.ts       abstract subscriber interface
-    StreamWriter.ts       abstract publisher interface
+    StreamReader.ts       abstract reader interface
+    StreamWriter.ts       abstract writer interface
     RpcRequester.ts       abstract RPC client interface
     RpcResponder.ts       abstract RPC server interface
     mqtt/                 MQTT transport (browser + Node.js)
       MqttConnection.ts
-      MqttPublisher.ts
-      MqttSubscriber.ts
+      MqttStreamWriter.ts
+      MqttStreamReader.ts
       MqttRpcRequester.ts
       MqttRpcResponder.ts
     webrtc/               WebRTC transport (browser only)
       WebRtcOptions.ts
       WebRtcSignaler.ts   WebRtcSignaler ABC + MqttSignaler
       WebRtcConnection.ts
-      WebRtcPublisher.ts
-      WebRtcSubscriber.ts
+      WebRtcStreamWriter.ts
+      WebRtcStreamReader.ts
       WebRtcRpcRequester.ts
       WebRtcRpcResponder.ts
 ```
@@ -603,7 +601,7 @@ npm run typecheck  # TypeScript type check only
 **Status:** Beta — API is stable for both MQTT and WebRTC transport layers.
 
 **Roadmap:**
-- React hooks (`useMagpieSubscriber`, `useMagpieRequest`)
+- React hooks (`useMagpieReader`, `useMagpieRequest`)
 - gRPC-web transport
 - Multi-transport routing
 

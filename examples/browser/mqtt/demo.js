@@ -1,10 +1,10 @@
 /* global Magpie */
-const { MqttConnection, MqttPublisher, MqttSubscriber,
+const { MqttConnection, MqttStreamWriter, MqttStreamReader,
         MqttRpcRequester, MqttRpcResponder, TimeoutError } = Magpie
 
 let conn       = null
-let publisher  = null
-let subscriber = null
+let writer     = null
+let reader     = null
 let requester  = null
 let responder  = null
 let subActive  = false
@@ -55,7 +55,7 @@ async function toggleConnect() {
   try {
     conn = new MqttConnection(uri)
     await conn.connect(10_000)
-    publisher = new MqttPublisher(conn)
+    publisher = new MqttStreamWriter(conn)
     setConnected(true)
   } catch (err) {
     alert(`Connection failed: ${err.message}`)
@@ -66,10 +66,10 @@ async function toggleConnect() {
 }
 
 async function cleanup() {
-  if (subscriber) { subscriber.close(); subscriber = null; subActive  = false }
+  if (reader)     { reader.close();     reader     = null; subActive  = false }
   if (requester)  { requester.close();  requester  = null }
   if (responder)  { responder.close();  responder  = null; respActive = false }
-  if (publisher)  { publisher.close();  publisher  = null }
+  if (writer)     { writer.close();     writer     = null }
   if (conn)       { await conn.disconnect(); conn   = null }
   setConnected(false)
   document.getElementById('btn-subscribe').textContent = 'Subscribe'
@@ -84,7 +84,7 @@ async function doPublish() {
   const topic = document.getElementById('pub-topic').value.trim()
   const raw   = document.getElementById('pub-msg').value.trim()
   if (!topic) return
-  await publisher.write(parsePayload(raw), topic)
+  await writer.write(parsePayload(raw), topic)
   appendLog('sub-log', null, `✓ published to '${topic}': ${raw}`)
 }
 
@@ -92,8 +92,8 @@ async function doPublish() {
 
 function toggleSubscribe() {
   if (subActive) {
-    subscriber.close()
-    subscriber = null
+    reader.close()
+    reader = null
     subActive  = false
     document.getElementById('btn-subscribe').textContent = 'Subscribe'
     document.getElementById('btn-subscribe').className   = 'success'
@@ -101,7 +101,7 @@ function toggleSubscribe() {
   }
   const topic = document.getElementById('sub-topic').value.trim()
   if (!topic) return
-  subscriber = new MqttSubscriber(conn, { topic })
+  subscriber = new MqttStreamReader(conn, { topic })
   subActive  = true
   document.getElementById('btn-subscribe').textContent = 'Unsubscribe'
   document.getElementById('btn-subscribe').className   = 'danger'
@@ -110,9 +110,9 @@ function toggleSubscribe() {
 }
 
 async function readLoop() {
-  while (subActive && subscriber) {
+  while (subActive && reader) {
     try {
-      const [data, topic] = await subscriber.read(3.0)
+      const [data, topic] = await reader.read(3.0)
       appendLog('sub-log', topic, JSON.stringify(data))
     } catch (err) {
       if (!subActive) break

@@ -1,5 +1,5 @@
 /**
- * Abstract stream writer (publisher).
+ * Abstract stream writer.
  * Mirrors Python's StreamWriter abstract base class.
  */
 export abstract class StreamWriter {

@@ -15,7 +15,7 @@
  *   await conn.connect(30)
  *
  *   // Data subscription (any non-media topic)
- *   const sub = new WebRtcSubscriber(conn, 'robot/state')
+ *   const sub = new WebRtcStreamReader(conn, 'robot/state')
  *   const [data, topic] = await sub.read(5.0)
  *   sub.close()
  *
@@ -39,7 +39,7 @@ class TimeoutError extends Error {
 }
 
 
-export class WebRtcSubscriber extends StreamReader {
+export class WebRtcStreamReader extends StreamReader {
   private readonly _connection: WebRtcConnection
   private readonly _topic: string
   private readonly _queueSize: number
@@ -63,11 +63,11 @@ export class WebRtcSubscriber extends StreamReader {
       this._enqueue([payload, t])
     connection.addPubCallback(topic, this._boundPubCallback)
 
-    Logger.debug(`WebRtcSubscriber: subscribed to '${topic}'.`)
+    Logger.debug(`WebRtcStreamReader: subscribed to '${topic}'.`)
   }
 
   async read(timeout?: number): Promise<[unknown, string]> {
-    if (this._closed) throw new Error('WebRtcSubscriber: already closed')
+    if (this._closed) throw new Error('WebRtcStreamReader: already closed')
 
     if (this._queue.length > 0) return this._queue.shift()!
 
@@ -77,7 +77,7 @@ export class WebRtcSubscriber extends StreamReader {
       if (timeout !== undefined) {
         waiter.timer = setTimeout(() => {
           this._waiters = this._waiters.filter(w => w !== waiter)
-          reject(new TimeoutError(`WebRtcSubscriber: read timeout after ${timeout}s`))
+          reject(new TimeoutError(`WebRtcStreamReader: read timeout after ${timeout}s`))
         }, timeout * 1000)
       }
 
@@ -91,11 +91,11 @@ export class WebRtcSubscriber extends StreamReader {
 
     for (const waiter of this._waiters) {
       if (waiter.timer) clearTimeout(waiter.timer)
-      waiter.reject(new Error('WebRtcSubscriber: closed'))
+      waiter.reject(new Error('WebRtcStreamReader: closed'))
     }
     this._waiters = []
 
-    Logger.debug(`WebRtcSubscriber: closed ('${this._topic}').`)
+    Logger.debug(`WebRtcStreamReader: closed ('${this._topic}').`)
   }
 
   // ---- Internal -----------------------------------------------------------

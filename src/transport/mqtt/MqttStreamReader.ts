@@ -24,12 +24,12 @@ interface Waiter {
  * Usage:
  *   const conn = new MqttConnection('mqtt://broker.example.com:1883')
  *   await conn.connect()
- *   const sub = new MqttSubscriber(conn, { topic: 'sensors/temperature' })
+ *   const sub = new MqttStreamReader(conn, { topic: 'sensors/temperature' })
  *   const [data, topic] = await sub.read(5.0)
  *   sub.close()
  *   await conn.disconnect()
  */
-export class MqttSubscriber extends StreamReader {
+export class MqttStreamReader extends StreamReader {
   private _connection: MqttConnection
   private _serializer: BaseSerializer
   private _topic: string
@@ -56,11 +56,11 @@ export class MqttSubscriber extends StreamReader {
     this._queueSize = options.queueSize ?? 10
 
     connection.addSubscription(this._topic, this._onMessage.bind(this), this._qos)
-    Logger.debug(`MqttSubscriber: subscribed to '${this._topic}'`)
+    Logger.debug(`MqttStreamReader: subscribed to '${this._topic}'`)
   }
 
   async read(timeout?: number): Promise<[unknown, string]> {
-    if (this._closed) throw new Error('MqttSubscriber: already closed')
+    if (this._closed) throw new Error('MqttStreamReader: already closed')
 
     if (this._queue.length > 0) {
       return this._queue.shift()!
@@ -74,7 +74,7 @@ export class MqttSubscriber extends StreamReader {
       if (timeout !== undefined) {
         timer = setTimeout(() => {
           this._waiters = this._waiters.filter(w => w !== waiter)
-          reject(new TimeoutError(`MqttSubscriber: read timeout after ${timeout}s`))
+          reject(new TimeoutError(`MqttStreamReader: read timeout after ${timeout}s`))
         }, timeout * 1000)
         waiter.timer = timer
       }
@@ -89,10 +89,10 @@ export class MqttSubscriber extends StreamReader {
     // Reject all pending waiters
     for (const waiter of this._waiters) {
       if (waiter.timer) clearTimeout(waiter.timer)
-      waiter.reject(new Error('MqttSubscriber: closed'))
+      waiter.reject(new Error('MqttStreamReader: closed'))
     }
     this._waiters = []
-    Logger.debug(`MqttSubscriber: closed ('${this._topic}')`)
+    Logger.debug(`MqttStreamReader: closed ('${this._topic}')`)
   }
 
   // ----------------------------------------------------------------
@@ -104,7 +104,7 @@ export class MqttSubscriber extends StreamReader {
     try {
       data = this._serializer.deserialize(payload)
     } catch (e) {
-      Logger.warning(`MqttSubscriber: deserialization error for topic '${topic}': ${e}`)
+      Logger.warning(`MqttStreamReader: deserialization error for topic '${topic}': ${e}`)
       return
     }
 

@@ -1,5 +1,5 @@
 /**
- * Abstract stream reader (subscriber).
+ * Abstract stream reader.
  * Mirrors Python's StreamReader abstract base class.
  */
 export abstract class StreamReader {

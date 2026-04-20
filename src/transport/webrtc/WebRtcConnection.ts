@@ -339,7 +339,7 @@ export class WebRtcConnection {
     Logger.debug(`WebRtcConnection(${this._peerId}): disconnected.`)
   }
 
-  // ---- Registration API (used by publisher / subscriber / rpc classes) ----
+  // ---- Registration API (used by writer / reader / rpc classes) ----
 
   addPubCallback(topic: string, callback: PubCallback): void {
     if (!this._pubCallbacks.has(topic)) this._pubCallbacks.set(topic, new Set())
@@ -665,7 +665,7 @@ export class WebRtcConnection {
     }
   }
 
-  // magpie-media fallback: route to pub callbacks by topic so WebRtcSubscriber
+  // magpie-media fallback: route to pub callbacks by topic so WebRtcStreamReader
   // handles these frames the same way as data-channel frames.
   private _routeMediaMessage(msg: unknown): void {
     if (!msg || typeof msg !== 'object') return

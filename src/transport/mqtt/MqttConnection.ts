@@ -8,8 +8,8 @@ type MessageCallback = (payload: Uint8Array, topic: string) => void
 /**
  * Shared MQTT broker connection.
  *
- * One MqttConnection per broker — share it across MqttPublisher,
- * MqttSubscriber, MqttRpcRequester, MqttRpcResponder instances.
+ * One MqttConnection per broker — share it across MqttStreamWriter,
+ * MqttStreamReader, MqttRpcRequester, MqttRpcResponder instances.
  *
  * Supported URI schemes: mqtt://, mqtts://, ws://, wss://
  * TLS is handled at the transport level (wss:// or mqtts://);

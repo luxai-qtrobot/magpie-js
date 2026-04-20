@@ -1,10 +1,10 @@
 /* global Magpie */
-const { WebRtcConnection, WebRtcPublisher, WebRtcSubscriber,
+const { WebRtcConnection, WebRtcStreamWriter, WebRtcStreamReader,
         WebRtcRpcRequester, WebRtcRpcResponder, AckTimeoutError, ReplyTimeoutError } = Magpie
 
 let conn       = null
-let publisher  = null
-let subscriber = null
+let writer     = null
+let reader     = null
 let requester  = null
 let responder  = null
 let subActive  = false
@@ -85,15 +85,15 @@ async function toggleConnect() {
     return
   }
 
-  publisher = new WebRtcPublisher(conn)
+  publisher = new WebRtcStreamWriter(conn)
   setStatus('connected')
 }
 
 async function cleanup() {
-  if (subActive)  { subscriber?.close(); subscriber = null; subActive  = false }
+  if (subActive)  { reader?.close(); reader = null; subActive  = false }
   if (respActive) { responder?.close();  responder  = null; respActive = false }
   requester?.close(); requester = null
-  publisher?.close(); publisher = null
+  writer?.close(); writer = null
   if (conn) { await conn.disconnect(); conn = null }
   setStatus('disconnected')
   document.getElementById('btn-subscribe').textContent = 'Subscribe'
@@ -108,7 +108,7 @@ async function doPublish() {
   const topic = document.getElementById('pub-topic').value.trim()
   const raw   = document.getElementById('pub-msg').value.trim()
   if (!topic) return
-  await publisher.write(parsePayload(raw), topic)
+  await writer.write(parsePayload(raw), topic)
   appendLog('sub-log', null, `✓ published to '${topic}': ${raw}`)
 }
 
@@ -116,7 +116,7 @@ async function doPublish() {
 
 function toggleSubscribe() {
   if (subActive) {
-    subscriber?.close(); subscriber = null; subActive = false
+    reader?.close(); reader = null; subActive = false
     document.getElementById('btn-subscribe').textContent = 'Subscribe'
     document.getElementById('btn-subscribe').className   = 'success'
     return
@@ -124,7 +124,7 @@ function toggleSubscribe() {
   const topic = document.getElementById('sub-topic').value.trim()
   if (!topic) return
 
-  subscriber = new WebRtcSubscriber(conn, topic)
+  subscriber = new WebRtcStreamReader(conn, topic)
   subActive  = true
   document.getElementById('btn-subscribe').textContent = 'Unsubscribe'
   document.getElementById('btn-subscribe').className   = 'danger'
@@ -133,9 +133,9 @@ function toggleSubscribe() {
 }
 
 async function subReadLoop() {
-  while (subActive && subscriber) {
+  while (subActive && reader) {
     try {
-      const [data, topic] = await subscriber.read(3.0)
+      const [data, topic] = await reader.read(3.0)
       appendLog('sub-log', topic, JSON.stringify(data))
     } catch (err) {
       if (!subActive) break
