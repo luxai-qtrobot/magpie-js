@@ -1,10 +1,10 @@
 {
   "name": "@luxai-qtrobot/magpie",
   "version": "0.5.0",
-  "description": "MAGPIE messaging engine for TypeScript/JavaScript — transport-agnostic pub/sub and RPC over MQTT/WebSocket",
+  "description": "MAGPIE messaging engine for TypeScript/JavaScript — transport-agnostic streaming and RPC over MQTT/WebSocket",
   "keywords": [
     "mqtt",
-    "pubsub",
+    "streaming",
     "rpc",
     "messaging",
     "robotics",
@@ -39,8 +39,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "example:publisher": "tsx examples/mqtt_publisher.ts",
-    "example:subscriber": "tsx examples/mqtt_subscriber.ts",
+    "example:writer": "tsx examples/mqtt_writer.ts",
+    "example:reader": "tsx examples/mqtt_reader.ts",
     "example:requester": "tsx examples/mqtt_requester.ts",
     "example:responder": "tsx examples/mqtt_responder.ts"
   },
