@@ -85,7 +85,7 @@ async function toggleConnect() {
     return
   }
 
-  publisher = new WebRtcStreamWriter(conn)
+  writer = new WebRtcStreamWriter(conn)
   setStatus('connected')
 }
 
@@ -124,7 +124,7 @@ function toggleSubscribe() {
   const topic = document.getElementById('sub-topic').value.trim()
   if (!topic) return
 
-  subscriber = new WebRtcStreamReader(conn, topic)
+  reader = new WebRtcStreamReader(conn, topic)
   subActive  = true
   document.getElementById('btn-subscribe').textContent = 'Unsubscribe'
   document.getElementById('btn-subscribe').className   = 'danger'

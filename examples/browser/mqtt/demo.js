@@ -55,7 +55,7 @@ async function toggleConnect() {
   try {
     conn = new MqttConnection(uri)
     await conn.connect(10_000)
-    publisher = new MqttStreamWriter(conn)
+    writer = new MqttStreamWriter(conn)
     setConnected(true)
   } catch (err) {
     alert(`Connection failed: ${err.message}`)
@@ -101,7 +101,7 @@ function toggleSubscribe() {
   }
   const topic = document.getElementById('sub-topic').value.trim()
   if (!topic) return
-  subscriber = new MqttStreamReader(conn, { topic })
+  reader = new MqttStreamReader(conn, { topic })
   subActive  = true
   document.getElementById('btn-subscribe').textContent = 'Unsubscribe'
   document.getElementById('btn-subscribe').className   = 'danger'
