@@ -19,21 +19,49 @@
 
 ---
 
-MAGPIE.js is the TypeScript/JavaScript port of [MAGPIE](https://github.com/luxai-qtrobot/magpie) — a lightweight, transport-agnostic messaging engine for distributed systems. It provides clean abstractions for topic-based streaming and request/response RPC, with two fully implemented transports: **MQTT** (browser + Node.js) and **WebRTC** (browser).
+MAGPIE.js is the TypeScript/JavaScript port of [MAGPIE](https://github.com/luxai-qtrobot/magpie) — a **transport-agnostic messaging and RPC framework for developers and AI agents**.
 
-Designed for **full wire-level interoperability** with the Python (`luxai-magpie`) and C++ (`libmagpie`) implementations — a browser client can talk directly to a Python or C++ MAGPIE node with no adaptation layer.
+Whether the wire is MQTT or WebRTC, the application layer never changes. Services built with MAGPIE.js are natively consumable by both code and AI tools via built-in MCP support — making it a natural integration engine for distributed systems, edge devices, and AI-driven pipelines. Fully wire-compatible with the Python and C++ MAGPIE implementations.
+
+---
+
+## Table of Contents
+
+- [Features](#features)
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+  - [MQTT Streaming](#mqtt-streaming)
+  - [MQTT Request / Response RPC](#mqtt-request--response-rpc)
+  - [MQTT Advanced Options](#mqtt-advanced-options)
+  - [Browser (CDN)](#browser-cdn)
+  - [WebRTC Streaming](#webrtc-streaming)
+  - [WebRTC Request / Response RPC](#webrtc-request--response-rpc)
+  - [WebRTC Advanced Options](#webrtc-advanced-options)
+  - [WebRTC Video and Audio](#webrtc-video-and-audio)
+  - [Schema-based RPC](#schema-based-rpc)
+  - [MCP Integration](#mcp-integration)
+- [Frames](#frames)
+- [Interoperability](#interoperability)
+- [Transport URI Schemes](#transport-uri-schemes)
+- [Examples](#examples)
+- [Project Structure](#project-structure)
+- [Development](#development)
+- [Related Projects](#related-projects)
+- [License](#license)
 
 ---
 
 ## Features
 
-- **Topic-based streaming** — topic-based messaging via `StreamWriter` / `StreamReader`
-- **Request/Response RPC** — async-native RPC via requester/responder pairs
-- **MQTT transport** — full streaming and RPC over MQTT; supports `mqtt://`, `mqtts://`, `ws://`, `wss://`, auth, LWT, and auto-reconnect
-- **WebRTC transport** — peer-to-peer streaming, RPC, video, and audio directly in the browser; uses MQTT as the signaling channel
-- **Pluggable transports** — same `StreamReader` / `StreamWriter` / `RpcRequester` / `RpcResponder` interfaces across all transports
+- **One API, any transport** — `StreamWriter`, `StreamReader`, `RpcRequester`, `RpcResponder` work identically over MQTT and WebRTC; swap transports with one constructor change
+- **Topic-based streaming** — high-throughput pub/sub via typed frames; publishers and subscribers are completely decoupled
+- **Request / Response RPC** — async-native request/reply with ACK, timeout, and per-call demux over any transport
+- **Schema-based RPC** — JSON-RPC 2.0 dispatch via `JsonRpcSchema`; define your API once, call methods by name with the proxy interface (`client.add({ a: 3, b: 4 })`)
+- **MCP support out of the box** — `McpSchema` turns any MAGPIE RPC responder into a fully compliant MCP tool server; `McpTransport` lets any `@modelcontextprotocol/sdk` `Client` call those tools over MQTT or WebRTC
+- **MQTT transport** — full streaming and RPC over MQTT; supports `mqtt://`, `mqtts://`, `ws://`, `wss://`, auth, LWT, and auto-reconnect; works in browser and Node.js
+- **WebRTC transport** — P2P streaming, video/audio, and RPC in the browser; MQTT used only for the initial signaling handshake; STUN + optional TURN for NAT traversal
+- **Typed frames** — `ImageFrameJpeg`, `AudioFrameRaw`, `DictFrame`, and more; wire-compatible with Python and C++
 - **Fast serialization** — msgpack by default; bring your own serializer via the abstract interface
-- **Typed frames** — `DictFrame`, `ImageFrameJpeg`, `AudioFrameRaw`, and more — wire-compatible with Python
 - **Browser + Node.js** — one package, works everywhere; MQTT works on both, WebRTC is browser-native
 - **CDN ready** — single UMD bundle, no bundler required
 
@@ -56,14 +84,14 @@ npm install @luxai-qtrobot/magpie
 All exports are available under the global `Magpie` object:
 
 ```js
-const { MqttConnection, MqttStreamWriter, MqttStreamReader, WebRtcConnection, WebRtcStreamReader } = Magpie
+const { MqttConnection, MqttStreamWriter, MqttStreamReader, McpSchema, McpTransport } = Magpie
 ```
 
 ---
 
-## Quick Start — MQTT
+## Quick Start
 
-### Streaming
+### MQTT Streaming
 
 **Writer:**
 
@@ -107,16 +135,28 @@ await conn.disconnect()
 Wildcard topics are fully supported:
 
 ```typescript
-// single-level wildcard
-const reader = new MqttStreamReader(conn, { topic: 'sensors/+/temperature' })
-
-// multi-level wildcard
-const reader = new MqttStreamReader(conn, { topic: 'sensors/#' })
+const reader = new MqttStreamReader(conn, { topic: 'sensors/+/temperature' })  // single-level
+const reader = new MqttStreamReader(conn, { topic: 'sensors/#' })               // multi-level
 ```
 
 ---
 
-### Request / Response RPC
+### MQTT Request / Response RPC
+
+**Responder:**
+
+```typescript
+import { MqttConnection, MqttRpcResponder } from '@luxai-qtrobot/magpie'
+
+const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
+await conn.connect()
+
+const server = new MqttRpcResponder(conn, 'myservice/actions')
+server.onRequest((request) => {
+  console.log('Request:', request)
+  return { status: 'ok', echo: request }
+})
+```
 
 **Requester:**
 
@@ -126,10 +166,10 @@ import { MqttConnection, MqttRpcRequester, AckTimeoutError, ReplyTimeoutError } 
 const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
 await conn.connect()
 
-const client = new MqttRpcRequester(conn, 'myrobot/motion')
+const client = new MqttRpcRequester(conn, 'myservice/actions')
 
 try {
-  const response = await client.call({ action: 'move', x: 1.0 }, 5.0)
+  const response = await client.call({ action: 'run' }, 5.0)
   console.log('Response:', response)
 } catch (err) {
   if (err instanceof AckTimeoutError)   console.error('No ACK — is the responder running?')
@@ -140,67 +180,23 @@ try {
 }
 ```
 
-**Responder:**
-
-```typescript
-import { MqttConnection, MqttRpcResponder } from '@luxai-qtrobot/magpie'
-
-const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
-await conn.connect()
-
-const server = new MqttRpcResponder(conn, 'myrobot/motion')
-
-server.onRequest((request) => {
-  console.log('Request:', request)
-  return { status: 'ok', echo: request }
-})
-```
-
 ---
 
-### Browser (CDN)
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-  <script src="https://cdn.jsdelivr.net/npm/@luxai-qtrobot/magpie/dist/magpie.umd.js"></script>
-</head>
-<body>
-<script>
-  const { MqttConnection, MqttStreamWriter, MqttStreamReader } = Magpie
-
-  // Browsers require WebSocket — use ws:// or wss://
-  const conn = new MqttConnection('wss://broker.hivemq.com:8884/mqtt')
-  await conn.connect()
-
-  const writer = new MqttStreamWriter(conn)
-  await writer.write({ hello: 'from browser' }, 'magpie/test')
-</script>
-</body>
-</html>
-```
-
-> **Note:** Browsers cannot open raw TCP connections. Always use `ws://` (plain WebSocket) or `wss://` (WebSocket + TLS) in browser and React applications. Node.js supports all schemes including `mqtt://` and `mqtts://`.
-
----
-
-### Advanced Connection Options
+### MQTT Advanced Options
 
 ```typescript
-import { MqttConnection, MqttOptions } from '@luxai-qtrobot/magpie'
+import { MqttConnection } from '@luxai-qtrobot/magpie'
 
 const conn = new MqttConnection('wss://broker.example.com:8884/mqtt', {
-  clientId: 'my-app-001',
+  clientId: 'node-01',
   auth: {
     mode: 'username_password',
-    username: 'user',
+    username: 'node',
     password: 'secret',
-    // mode: 'token' — pass a JWT or API key as username (e.g. Ably, HiveMQ Cloud)
   },
   will: {
     enabled: true,
-    topic: 'devices/my-app-001/status',
+    topic: 'nodes/node-01/status',
     payload: 'offline',
     qos: 1,
     retain: true,
@@ -218,58 +214,51 @@ const conn = new MqttConnection('wss://broker.example.com:8884/mqtt', {
 await conn.connect()
 ```
 
-> **mTLS note:** Client certificate authentication (mTLS) is not supported from browser JavaScript. Use `username_password` or `token` mode for browser clients. mTLS remains available in the Python and C++ MAGPIE implementations for backend-to-backend communication.
-
 ---
 
-## Quick Start — WebRTC
+### Browser (CDN)
 
-WebRTC transport enables direct peer-to-peer communication between the browser and a Python or C++ MAGPIE node — with streaming, RPC, and live video/audio streaming — all without routing data through a broker. MQTT is used only as the signaling channel to establish the WebRTC connection.
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <script src="https://cdn.jsdelivr.net/npm/@luxai-qtrobot/magpie/dist/magpie.umd.js"></script>
+</head>
+<body>
+<script>
+  const { MqttConnection, MqttStreamWriter } = Magpie
 
-> **Browser only:** WebRTC uses native browser APIs (`RTCPeerConnection`). No extra dependencies are required, but this transport is not available in Node.js.
+  // Browsers require WebSocket — use ws:// or wss://
+  const conn = new MqttConnection('wss://broker.hivemq.com:8884/mqtt')
+  await conn.connect()
 
-### Connect to a peer
-
-```javascript
-import { WebRtcConnection } from '@luxai-qtrobot/magpie'
-
-// Connect via MQTT signaling — waits up to 60 s for the remote peer
-const conn = await WebRtcConnection.withMqtt(
-  'wss://broker.hivemq.com:8884/mqtt',  // MQTT broker used for signaling only
-  'my-robot',                            // shared session ID — must match the Python side
-  { reconnect: true }                    // auto-reconnect if the peer disconnects
-)
-
-const connected = await conn.connect(60)  // timeout in seconds
-if (!connected) {
-  console.error('Peer not reachable — is the Python side running?')
-}
+  const writer = new MqttStreamWriter(conn)
+  await writer.write({ hello: 'from browser' }, 'magpie/test')
+</script>
+</body>
+</html>
 ```
 
-Start the Python peer with the same session ID:
-
-```bash
-# Python MAGPIE — any WebRTC-enabled tool, e.g. video capture
-magpie-video-capture-webrtc \
-  --broker wss://broker.hivemq.com:8884/mqtt \
-  --session my-robot \
-  --reconnect
-```
+> **Note:** Browsers cannot open raw TCP connections. Always use `ws://` or `wss://` in browser environments. Node.js supports all schemes including `mqtt://` and `mqtts://`.
 
 ---
 
 ### WebRTC Streaming
+
+WebRTC enables **P2P communication over the internet** — no broker in the data path after the initial signaling handshake. Signaling is exchanged via MQTT.
+
+> **Browser only:** WebRTC uses native browser APIs (`RTCPeerConnection`). This transport is not available in Node.js.
 
 **Writer:**
 
 ```javascript
 import { WebRtcConnection, WebRtcStreamWriter } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node')
 await conn.connect(60)
 
 const writer = new WebRtcStreamWriter(conn)
-await writer.write({ action: 'greet', name: 'browser' }, 'magpie/demo')
+await writer.write({ telemetry: [0.1, 0.2, 0.3] }, 'service/state')
 
 writer.close()
 await conn.disconnect()
@@ -280,10 +269,10 @@ await conn.disconnect()
 ```javascript
 import { WebRtcConnection, WebRtcStreamReader, TimeoutError } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node')
 await conn.connect(60)
 
-const reader = new WebRtcStreamReader(conn, 'robot/state')
+const reader = new WebRtcStreamReader(conn, 'service/state')
 
 while (true) {
   try {
@@ -294,162 +283,351 @@ while (true) {
     break
   }
 }
-
-reader.close()
-await conn.disconnect()
 ```
 
 ---
 
 ### WebRTC Request / Response RPC
 
-**Requester:**
-
-```javascript
-import { WebRtcConnection, WebRtcRpcRequester, AckTimeoutError, ReplyTimeoutError } from '@luxai-qtrobot/magpie'
-
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
-await conn.connect(60)
-
-const client = new WebRtcRpcRequester(conn, 'myrobot/motion')
-
-try {
-  const response = await client.call({ action: 'move', x: 1.0 }, 5.0)
-  console.log('Response:', response)
-} catch (err) {
-  if (err instanceof AckTimeoutError)   console.error('No ACK — is the responder running?')
-  if (err instanceof ReplyTimeoutError) console.error('No reply within timeout')
-} finally {
-  client.close()
-  await conn.disconnect()
-}
-```
+No broker in the hot path — the data channel is bidirectional P2P.
 
 **Responder:**
 
 ```javascript
 import { WebRtcConnection, WebRtcRpcResponder } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node-rpc')
 await conn.connect(60)
 
-const server = new WebRtcRpcResponder(conn, 'myrobot/motion')
+const server = new WebRtcRpcResponder(conn, 'service/actions')
+server.onRequest((request) => ({ status: 'ok', echo: request }))
+```
 
-server.onRequest((request) => {
-  console.log('Request:', request)
-  return { status: 'ok', echo: request }
-})
+**Requester:**
+
+```javascript
+import { WebRtcConnection, WebRtcRpcRequester } from '@luxai-qtrobot/magpie'
+
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node-rpc')
+await conn.connect(60)
+
+const client = new WebRtcRpcRequester(conn, 'service/actions')
+const response = await client.call({ action: 'run' }, 5.0)
+console.log('Response:', response)
 ```
 
 ---
 
-### WebRTC Video and Audio (browser)
-
-Declare which topic paths carry video/audio in `WebRtcOptions`, then use `receiveVideoTrack(topic)` / `receiveAudioTrack(topic)` to obtain native `MediaStreamTrack` objects. Each call returns a `Promise` that resolves when the remote peer's track arrives (or immediately if it already has).
-
-```javascript
-import { WebRtcConnection } from '@luxai-qtrobot/magpie'
-
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-robot', {
-  webrtcOptions: {
-    videoTopics: ['/camera/color/image'],   // each entry = one RTP video track
-    audioTopics: ['/mic/audio/stream'],     // each entry = one RTP audio track
-  },
-})
-
-await conn.connect(60)
-
-// Receive the video track and attach it to a <video> element
-const videoTrack = await conn.receiveVideoTrack('/camera/color/image')
-const videoEl = document.getElementById('video-el')
-videoEl.srcObject = new MediaStream([videoTrack])
-await videoEl.play()
-
-// Receive the audio track
-const audioTrack = await conn.receiveAudioTrack('/mic/audio/stream')
-const audioEl = new Audio()
-audioEl.srcObject = new MediaStream([audioTrack])
-// unmute on user interaction to satisfy browser autoplay policy
-```
-
-Multiple tracks work exactly the same way — just add more topics and call `receiveVideoTrack`/`receiveAudioTrack` for each:
-
-```javascript
-const conn = await WebRtcConnection.withMqtt('wss://broker:8884/mqtt', 'my-robot', {
-  webrtcOptions: {
-    videoTopics: ['/camera/color/image', '/camera/depth/image'],
-    audioTopics: ['/mic/audio/stream'],
-  },
-})
-await conn.connect(60)
-
-const colorTrack = await conn.receiveVideoTrack('/camera/color/image')
-const depthTrack = await conn.receiveVideoTrack('/camera/depth/image')
-const audioTrack = await conn.receiveAudioTrack('/mic/audio/stream')
-```
-
-For sending local video/audio to the remote peer (browser as writer):
-
-```javascript
-// Obtain browser camera/mic tracks
-const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
-
-// Register tracks before connect()
-conn.sendVideoTrack(stream.getVideoTracks()[0], '/camera/color/image')
-conn.sendAudioTrack(stream.getAudioTracks()[0], '/mic/audio/stream')
-
-await conn.connect(60)
-```
-
-> **Autoplay policy:** Browsers mute autoplay by default. Set `<video muted>` initially and unmute on user interaction (e.g. a button click) to comply with browser autoplay policies.
-
-> **Python tool topics:** The Python `magpie-video-capture-webrtc` and `magpie-audio-capture-webrtc` tools default to topic `"video"` and `"audio"` respectively. Pass the matching topic to `receiveVideoTrack`/`receiveAudioTrack` or set it explicitly with the `--topic` argument on the Python side.
-
----
-
-### Advanced WebRTC Options
+### WebRTC Advanced Options
 
 ```javascript
 import { WebRtcConnection } from '@luxai-qtrobot/magpie'
 
 const conn = await WebRtcConnection.withMqtt(
   'wss://broker.example.com:8884/mqtt',
-  'my-robot',
+  'my-node',
   {
-    reconnect: true,           // auto-reconnect when the peer disconnects
+    reconnect: true,
     webrtcOptions: {
-      stunServers: [],         // disable STUN — useful for purely local testing
-      // stunServers: ['stun:stun.l.google.com:19302'],  // default
-      turnServers: [
-        { url: 'turn:turn.example.com:3478', username: 'user', credential: 'pass' }
-      ],
-      iceTransportPolicy: 'relay',   // force TURN relay (firewall-friendly)
-      videoTopics: ['/camera/color/image', '/camera/depth/image'],  // RTP video tracks
-      audioTopics: ['/mic/audio/stream'],                           // RTP audio tracks
+      stunServers: ['stun:stun.l.google.com:19302'],
+      turnServers: [{ url: 'turn:turn.example.com:3478', username: 'u', credential: 'p' }],
+      iceTransportPolicy: 'relay',
+      videoTopics: ['/camera/color/image'],
+      audioTopics: ['/mic/audio/stream'],
     },
   }
 )
 ```
 
-Topics can also be registered at runtime via `sendVideoTrack`/`receiveVideoTrack` before `connect()` — they are added to the topic lists automatically.
+---
+
+### WebRTC Video and Audio
+
+Declare topics in `webrtcOptions`, then use `receiveVideoTrack` / `receiveAudioTrack` to get native `MediaStreamTrack` objects:
+
+```javascript
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node', {
+  webrtcOptions: {
+    videoTopics: ['/camera/color/image'],
+    audioTopics: ['/mic/audio/stream'],
+  },
+})
+await conn.connect(60)
+
+const videoTrack = await conn.receiveVideoTrack('/camera/color/image')
+const videoEl = document.getElementById('video')
+videoEl.srcObject = new MediaStream([videoTrack])
+await videoEl.play()
+```
+
+For sending local camera/mic to the remote peer:
+
+```javascript
+const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true })
+conn.sendVideoTrack(stream.getVideoTracks()[0], '/camera/color/image')
+conn.sendAudioTrack(stream.getAudioTracks()[0], '/mic/audio/stream')
+await conn.connect(60)
+```
+
+---
+
+### Schema-based RPC
+
+`JsonRpcSchema` adds JSON-RPC 2.0 dispatch on top of any MAGPIE transport. Define your API once — shape, description, and types — then attach handlers and call methods by name. The same schema object works on both sides.
+
+**Responder — two ways to define methods:**
+
+```typescript
+import { MqttConnection, MqttRpcResponder, JsonRpcSchema } from '@luxai-qtrobot/magpie'
+
+const schema = new JsonRpcSchema()
+
+// Way A: load from a standard JSON Schema file, attach handlers separately
+const schema2 = JsonRpcSchema.fromJsonString(API_JSON)
+
+schema2.handler('convert', (p: unknown) => {
+  const { value, from_unit, to_unit } = p as { value: number; from_unit: string; to_unit: string }
+  return { result: value, unit: to_unit }
+})
+
+// Way B: register method with handler together
+schema.register(
+  'add',
+  (p: unknown) => {
+    const { a, b } = p as { a: number; b: number }
+    return a + b
+  },
+  {
+    description: 'Add two numbers',
+    inputSchema: {
+      type: 'object',
+      properties: { a: { type: 'number' }, b: { type: 'number' } },
+      required: ['a', 'b'],
+    },
+  },
+)
+
+const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
+await conn.connect()
+
+const server = new MqttRpcResponder(conn, 'myservice/actions', { schema })
+// No onRequest() needed — schema handles dispatch automatically
+```
+
+The JSON file uses standard MCP/JSON Schema format. `description` and `outputSchema` are optional; `outputSchema` must be `{"type": "object"}` for structured output:
+
+```json
+[
+  {
+    "name": "convert",
+    "description": "Convert a value from one unit to another",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "value":     {"type": "number"},
+        "from_unit": {"type": "string"},
+        "to_unit":   {"type": "string"}
+      },
+      "required": ["value", "from_unit", "to_unit"]
+    }
+  },
+  {
+    "name": "get_status",
+    "description": "Return the current service status",
+    "inputSchema": {
+      "type": "object",
+      "properties": { "service": {"type": "string"} },
+      "required": ["service"]
+    },
+    "outputSchema": { "type": "object" }
+  }
+]
+```
+
+**Requester — proxy interface:**
+
+```typescript
+import { MqttConnection, MqttRpcRequester, JsonRpcSchema, JsonRpcError, createJsonRpcClient } from '@luxai-qtrobot/magpie'
+
+const schema = new JsonRpcSchema()
+schema.register('add', null, {
+  inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] },
+})
+
+const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
+await conn.connect()
+
+const requester = new MqttRpcRequester(conn, 'myservice/actions')
+const client = createJsonRpcClient(requester, schema)
+
+// Proxy style — method name as property
+const result = await client.add({ a: 3, b: 4 })     // → 7
+
+// Explicit call style
+const result = await client.call('add', { a: 3, b: 4 })
+
+// With explicit timeout (seconds)
+const result = await client.call('add', { a: 3, b: 4 }, 5.0)
+
+try {
+  await client.call('nonexistent')
+} catch (e) {
+  if (e instanceof JsonRpcError) console.error(e.code, e.message)  // -32601 Method not found
+}
+
+client.close()
+```
+
+---
+
+### MCP Integration
+
+MAGPIE.js has native MCP support on both sides of the connection — no separate MCP server process required.
+
+**Server side** — `McpSchema` extends `JsonRpcSchema` with the full MCP handshake. Any registered method is automatically exposed as an MCP tool.
+
+**Agent / cloud side** — `McpTransport` implements the `Transport` interface from `@modelcontextprotocol/sdk`. The caller creates and owns the requester; `McpTransport` borrows it.
+
+The key value proposition: a service behind NAT connects **outbound** to a broker; an LLM agent on the cloud connects to the same broker. No port forwarding, no VPN.
+
+```bash
+npm install @modelcontextprotocol/sdk   # only needed on the agent/client side
+```
+
+#### Server side — serve tools over any transport
+
+```typescript
+import { McpSchema } from '@luxai-qtrobot/magpie'
+
+const schema = new McpSchema({ name: 'my-service', version: '1.0.0' })
+
+schema.register(
+  'translate',
+  (p: unknown) => {
+    const { text, target_lang } = p as { text: string; target_lang: string }
+    return { translated: `[${target_lang}] ${text}`, lang: target_lang }
+  },
+  {
+    description: 'Translate text into the target language.',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string' }, target_lang: { type: 'string' } },
+      required: ['text', 'target_lang'],
+    },
+    outputSchema: { type: 'object' },
+  },
+)
+
+schema.register(
+  'summarize',
+  (p: unknown) => {
+    const { text, max_length } = p as { text: string; max_length: number }
+    return { summary: text.slice(0, max_length) }
+  },
+  {
+    description: 'Summarize text to at most max_length characters.',
+    inputSchema: {
+      type: 'object',
+      properties: { text: { type: 'string' }, max_length: { type: 'integer' } },
+      required: ['text', 'max_length'],
+    },
+    outputSchema: { type: 'object' },
+  },
+)
+```
+
+Attach to any responder:
+
+```typescript
+// MQTT — service behind NAT
+import { MqttConnection, MqttRpcResponder } from '@luxai-qtrobot/magpie'
+
+const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
+await conn.connect()
+const server = new MqttRpcResponder(conn, 'node-01', { schema })
+
+// WebRTC — P2P, lowest latency
+import { WebRtcConnection, WebRtcRpcResponder } from '@luxai-qtrobot/magpie'
+
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'node-01')
+await conn.connect(60)
+const server = new WebRtcRpcResponder(conn, 'node-01', { schema })
+```
+
+Serve loop (same for all):
+
+```typescript
+// No loop needed — MQTT and WebRTC responders handle requests event-driven
+// Just keep the process alive and the schema handles everything
+```
+
+#### Agent / cloud side — call tools with @modelcontextprotocol/sdk Client
+
+```typescript
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { MqttConnection, MqttRpcRequester, McpTransport } from '@luxai-qtrobot/magpie'
+
+const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
+await conn.connect()
+
+const requester = new MqttRpcRequester(conn, 'node-01')
+const transport = new McpTransport(requester)
+
+const client = new Client({ name: 'my-agent', version: '1.0.0' })
+await client.connect(transport)
+
+const { tools } = await client.listTools()
+for (const tool of tools) console.log(`  ${tool.name}: ${tool.description}`)
+
+const result = await client.callTool({ name: 'translate', arguments: { text: 'Hello', target_lang: 'fr' } })
+console.log(result.content[0].text)
+
+await client.close()
+requester.close()
+conn.disconnect()
+```
+
+For WebRTC, just swap the requester — `McpTransport` is identical:
+
+```typescript
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'node-01')
+await conn.connect(60)
+const requester = new WebRtcRpcRequester(conn, 'node-01')
+
+const client = new Client({ name: 'my-agent', version: '1.0.0' })
+await client.connect(new McpTransport(requester))
+```
+
+#### Loading tools from an MCP tool-list file
+
+```typescript
+import { McpSchema } from '@luxai-qtrobot/magpie'
+
+const schema = McpSchema.fromJsonFile('tools.json')   // MCP native format
+
+schema.handler('translate', (p: unknown) => {
+  const { text, target_lang } = p as { text: string; target_lang: string }
+  return { translated: `[${target_lang}] ${text}`, lang: target_lang }
+})
+```
 
 ---
 
 ## Frames
 
-Frames are typed message wrappers that carry standard metadata (`gid`, `id`, `name`, `timestamp`) alongside the payload. They are wire-compatible with Python and C++ MAGPIE frames, and can be used with both MQTT and WebRTC transports.
+Frames are typed message wrappers with standard metadata (`gid`, `id`, `name`, `timestamp`). Wire-compatible with Python and C++ MAGPIE frames across all transports.
 
 ```typescript
-import { DictFrame, ImageFrameJpeg, AudioFrameRaw, Frame } from '@luxai-qtrobot/magpie'
+import { DictFrame, ImageFrameJpeg, Frame } from '@luxai-qtrobot/magpie'
 
 // Create and write a frame
 const frame = new DictFrame({ value: { count: 1, msg: 'hello' } })
-await writer.write(frame.toDict(), 'myrobot/data')
+await writer.write(frame.toDict(), 'service/data')
 
-// Reconstruct a frame received from the wire
+// Reconstruct from wire
 const [raw, topic] = await reader.read()
 const frame = Frame.fromDict(raw as Record<string, unknown>)
-// frame is automatically dispatched to the correct subclass (DictFrame, ImageFrameJpeg, etc.)
+// dispatched to the correct subclass (DictFrame, ImageFrameJpeg, etc.)
 ```
 
 | Frame | Description |
@@ -464,85 +642,73 @@ const frame = Frame.fromDict(raw as Record<string, unknown>)
 
 ## Interoperability
 
-MAGPIE.js shares the same wire format as the Python and C++ implementations across both transports:
+MAGPIE.js shares the same wire format as the Python and C++ implementations:
 
 - **Serialization:** msgpack (wire-compatible with Python's `msgpack.packb` / `msgpack.unpackb`)
-- **RPC protocol:** identical message envelope (`rid`, `reply_to`, `payload`) on both MQTT topics and WebRTC data channels
-- **WebRTC data channel envelope:** `{type: "pub"|"rpc_req"|"rpc_ack"|"rpc_rep", topic, payload}` — identical to Python
-- **Frames:** identical field names and snake_case keys (e.g. `pixel_format`, `sample_rate`)
-- **WebRTC signaling:** identical hello/offer/answer/ICE candidate flow — interoperable with `luxai-magpie[webrtc]` and `libmagpie-webrtc`
+- **RPC protocol:** identical message envelope (`rid`, `reply_to`, `payload`) on MQTT; `{type, rid, payload}` on WebRTC
+- **Frames:** identical field names and snake_case keys (`pixel_format`, `sample_rate`)
+- **Schema/MCP:** identical JSON-RPC 2.0 envelope and MCP tool protocol — a Python `McpTransport` client can call a JS `McpSchema` server and vice versa
+- **WebRTC signaling:** identical hello/offer/answer/ICE flow — interoperable with `luxai-magpie[webrtc]`
 
-This means any combination of Python, C++, and JavaScript nodes can communicate directly — no bridges, no adapters.
-
-**Cross-language examples:**
-
-```bash
-# Python WebRTC peer sends video → browser receives and displays it
-magpie-video-capture-webrtc --broker wss://broker.hivemq.com:8884/mqtt --session my-robot --reconnect
-# Open examples/browser/webrtc/video.html in the browser
-
-# Python MAGPIE RPC responder → browser sends requests
-python examples/mqtt_responder.py
-
-# JS MQTT requester talks to Python responder
-npm run example:requester
-```
+Any combination of Python, C++, and JavaScript nodes communicate directly — no bridges, no adapters.
 
 ---
 
-## Transport URI schemes
+## Transport URI Schemes
 
-| Scheme | Protocol | Use case |
+| Scheme | Protocol | Environment |
 |---|---|---|
 | `mqtt://host:1883` | Plain MQTT (TCP) | Node.js |
-| `mqtts://host:8883` | MQTT over TLS (TCP) | Node.js (secure) |
-| `ws://host:8000/mqtt` | MQTT over WebSocket | Browser (plain) |
-| `wss://host:8884/mqtt` | MQTT over WebSocket + TLS | Browser (secure, recommended) |
+| `mqtts://host:8883` | MQTT over TLS | Node.js |
+| `ws://host:8000/mqtt` | MQTT over WebSocket | Browser |
+| `wss://host:8884/mqtt` | MQTT over WebSocket + TLS | Browser (recommended) |
 
-WebRTC signaling uses the same MQTT WebSocket connection; the actual peer-to-peer data and media flow directly between browser and peer.
+WebRTC signaling uses the same MQTT connection; peer-to-peer data and media flow directly between peers.
 
 ---
 
 ## Examples
 
-### MQTT (Node.js)
+### MQTT
 
 | Example | Description |
 |---|---|
-| [`examples/mqtt_stream_writer.ts`](examples/mqtt_stream_writer.ts) | Write messages at 1 Hz |
-| [`examples/mqtt_stream_reader.ts`](examples/mqtt_stream_reader.ts) | Read and print messages |
-| [`examples/mqtt_requester.ts`](examples/mqtt_requester.ts) | Send RPC requests at 1 Hz |
-| [`examples/mqtt_responder.ts`](examples/mqtt_responder.ts) | Echo RPC responder |
+| [`examples/mqtt/mqtt_writer.ts`](examples/mqtt/mqtt_writer.ts) | Publish messages to a topic |
+| [`examples/mqtt/mqtt_reader.ts`](examples/mqtt/mqtt_reader.ts) | Subscribe and print messages |
+| [`examples/mqtt/mqtt_requester.ts`](examples/mqtt/mqtt_requester.ts) | Send RPC requests |
+| [`examples/mqtt/mqtt_responder.ts`](examples/mqtt/mqtt_responder.ts) | Echo RPC responder |
+
+### Schema
+
+| Example | Description |
+|---|---|
+| [`examples/schema/mqtt_schema_responder.ts`](examples/schema/mqtt_schema_responder.ts) | JSON-RPC responder with schema dispatch |
+| [`examples/schema/mqtt_schema_requester.ts`](examples/schema/mqtt_schema_requester.ts) | JSON-RPC requester with proxy interface |
+
+### MCP
+
+| Example | Description |
+|---|---|
+| [`examples/mcp/mqtt_mcp_server.ts`](examples/mcp/mqtt_mcp_server.ts) | MCP tool server over MQTT |
+| [`examples/mcp/mqtt_mcp_client.ts`](examples/mcp/mqtt_mcp_client.ts) | MCP client via `@modelcontextprotocol/sdk` |
+
+### Browser
+
+| Example | Description |
+|---|---|
+| [`examples/browser/mqtt/demo.js`](examples/browser/mqtt/demo.js) | MQTT streaming + RPC in the browser |
+| [`examples/browser/webrtc/messaging.js`](examples/browser/webrtc/messaging.js) | WebRTC data channel messaging |
+| [`examples/browser/webrtc/video.js`](examples/browser/webrtc/video.js) | WebRTC live video + audio |
 
 Run Node.js examples:
 
 ```bash
-npm run example:writer
-npm run example:reader
-npm run example:requester
-npm run example:responder
+npm run example:schema:responder   # terminal 1
+npm run example:schema:requester   # terminal 2
+
+npm run example:mcp:server         # terminal 1
+npm run example:mcp:client         # terminal 2
 ```
-
-### Browser demos
-
-| Example | Description |
-|---|---|
-| [`examples/browser/demo.html`](examples/browser/demo.html) | MQTT interactive browser demo (streaming + RPC) |
-| [`examples/browser/webrtc/messaging.html`](examples/browser/webrtc/messaging.html) | WebRTC messaging demo (streaming + RPC over data channel) |
-| [`examples/browser/webrtc/video.html`](examples/browser/webrtc/video.html) | WebRTC video viewer (live video + audio + data channel) |
-
-Build the bundle first, then open any demo directly in your browser:
-
-```bash
-npm run build
-# open examples/browser/demo.html or examples/browser/webrtc/messaging.html in your browser
-```
-
-> **WebRTC demos:** These require a local HTTP server due to browser security policies (`file://` origins cannot use `RTCPeerConnection`). Serve the project root with any static server:
-> ```bash
-> npx serve c:/code/magpie-js
-> # then open http://localhost:3000/examples/browser/webrtc/messaging.html
-> ```
 
 ---
 
@@ -550,27 +716,32 @@ npm run build
 
 ```
 src/
-  serializer/       BaseSerializer, MsgpackSerializer
-  frames/           Frame base + all frame types
+  serializer/         BaseSerializer, MsgpackSerializer
+  frames/             Frame base + all frame types
   transport/
-    StreamReader.ts       abstract reader interface
-    StreamWriter.ts       abstract writer interface
-    RpcRequester.ts       abstract RPC client interface
-    RpcResponder.ts       abstract RPC server interface
-    mqtt/                 MQTT transport (browser + Node.js)
+    StreamReader.ts         abstract reader
+    StreamWriter.ts         abstract writer
+    RpcRequester.ts         abstract RPC client
+    RpcResponder.ts         abstract RPC server
+    mqtt/                   MQTT transport (browser + Node.js)
       MqttConnection.ts
       MqttStreamWriter.ts
       MqttStreamReader.ts
       MqttRpcRequester.ts
-      MqttRpcResponder.ts
-    webrtc/               WebRTC transport (browser only)
-      WebRtcOptions.ts
-      WebRtcSignaler.ts   WebRtcSignaler ABC + MqttSignaler
+      MqttRpcResponder.ts   accepts { schema? } option
+    webrtc/                 WebRTC transport (browser)
       WebRtcConnection.ts
       WebRtcStreamWriter.ts
       WebRtcStreamReader.ts
       WebRtcRpcRequester.ts
-      WebRtcRpcResponder.ts
+      WebRtcRpcResponder.ts accepts { schema? } option
+  schema/
+    BaseSchema.ts           abstract dispatch interface
+    JsonRpcSchema.ts        JSON-RPC 2.0 dispatch + fromJsonString/fromJsonFile + proxy client
+    McpSchema.ts            MCP protocol (initialize, tools/list, tools/call, structuredContent)
+  adapters/
+    mcp/
+      McpTransport.ts       @modelcontextprotocol/sdk-compatible Transport
 ```
 
 ---
@@ -581,7 +752,7 @@ src/
 npm install        # install dependencies
 npm run build      # build ESM, CJS, and UMD bundles
 npm test           # run unit tests
-npm run typecheck  # TypeScript type check only
+npm run typecheck  # TypeScript type check
 ```
 
 ---
@@ -593,17 +764,6 @@ npm run typecheck  # TypeScript type check only
 | MAGPIE | Python | [luxai-qtrobot/magpie](https://github.com/luxai-qtrobot/magpie) |
 | MAGPIE C++ | C++ (`libmagpie`, `libmagpie-mqtt`) | [luxai-qtrobot/magpie-cpp](https://github.com/luxai-qtrobot/magpie-cpp) |
 | MAGPIE.js | TypeScript/JavaScript | this repo |
-
----
-
-## Project Status
-
-**Status:** Beta — API is stable for both MQTT and WebRTC transport layers.
-
-**Roadmap:**
-- React hooks (`useMagpieReader`, `useMagpieRequest`)
-- gRPC-web transport
-- Multi-transport routing
 
 ---
 

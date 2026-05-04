@@ -3,6 +3,7 @@ import { MsgpackSerializer } from '../../serializer/MsgpackSerializer'
 import { BaseSerializer } from '../../serializer/BaseSerializer'
 import { Logger } from '../../utils/logger'
 import { MqttConnection } from './MqttConnection'
+import { BaseSchema } from '../../schema/BaseSchema'
 
 /**
  * MQTT-based RPC responder — implements RpcResponder.
@@ -24,6 +25,7 @@ export class MqttRpcResponder extends RpcResponder {
   private _reqTopic: string
   private _qos?: 0 | 1 | 2
   private _handler: RequestHandler | null = null
+  private _schema: BaseSchema | null = null
 
   constructor(
     connection: MqttConnection,
@@ -31,12 +33,14 @@ export class MqttRpcResponder extends RpcResponder {
     options?: {
       serializer?: BaseSerializer
       qos?: 0 | 1 | 2
+      schema?: BaseSchema
     }
   ) {
     super()
     this._connection = connection
     this._serializer = options?.serializer ?? new MsgpackSerializer()
     this._qos = options?.qos
+    this._schema = options?.schema ?? null
 
     const svc = serviceName.replace(/^\//, '')
     this._reqTopic = `${svc}/rpc/req`
@@ -85,14 +89,19 @@ export class MqttRpcResponder extends RpcResponder {
       return
     }
 
-    if (!this._handler) {
-      Logger.warning(`MqttRpcResponder: no handler registered, dropping request rid='${rid}'`)
+    if (!this._schema && !this._handler) {
+      Logger.warning(`MqttRpcResponder: no handler or schema registered, dropping request rid='${rid}'`)
       return
     }
 
-    // Call handler and send response
+    // Call schema.dispatch() or handler and send response
     try {
-      const result = await Promise.resolve(this._handler(msg['payload']))
+      let result: unknown
+      if (this._schema) {
+        result = await this._schema.dispatch(msg['payload'])
+      } else {
+        result = await Promise.resolve(this._handler!(msg['payload']))
+      }
       const reply = this._serializer.serialize({ rid, payload: result })
       await this._connection.publish(replyTo, reply, this._qos ?? 1)
     } catch (e) {

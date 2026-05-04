@@ -28,18 +28,25 @@
 import { RpcResponder, RequestHandler } from '../RpcResponder'
 import { Logger } from '../../utils/logger'
 import { WebRtcConnection } from './WebRtcConnection'
+import { BaseSchema } from '../../schema/BaseSchema'
 
 
 export class WebRtcRpcResponder extends RpcResponder {
   private readonly _connection: WebRtcConnection
   private readonly _serviceName: string
   private _handler: RequestHandler | null = null
+  private _schema: BaseSchema | null = null
   private readonly _boundCallback: (msg: unknown) => void
 
-  constructor(connection: WebRtcConnection, serviceName: string) {
+  constructor(
+    connection: WebRtcConnection,
+    serviceName: string,
+    options?: { schema?: BaseSchema },
+  ) {
     super()
     this._connection = connection
     this._serviceName = serviceName.replace(/^\//, '')
+    this._schema = options?.schema ?? null
     this._boundCallback = this._onRequest.bind(this)
     connection.addRpcService(this._serviceName, this._boundCallback)
     Logger.debug(`WebRtcRpcResponder: listening on service '${this._serviceName}'.`)
@@ -69,15 +76,20 @@ export class WebRtcRpcResponder extends RpcResponder {
     // Send ACK immediately before invoking the handler
     this._connection.sendData({ type: 'rpc_ack', rid })
 
-    if (!this._handler) {
+    if (!this._schema && !this._handler) {
       Logger.warning(
-        `WebRtcRpcResponder: no handler registered — dropping request rid='${rid}'`,
+        `WebRtcRpcResponder: no handler or schema registered — dropping request rid='${rid}'`,
       )
       return
     }
 
     try {
-      const result = await Promise.resolve(this._handler(m['payload']))
+      let result: unknown
+      if (this._schema) {
+        result = await this._schema.dispatch(m['payload'])
+      } else {
+        result = await Promise.resolve(this._handler!(m['payload']))
+      }
       this._connection.sendData({ type: 'rpc_rep', rid, payload: result })
     } catch (e) {
       Logger.warning(`WebRtcRpcResponder: handler error for rid='${rid}': ${e}`)

@@ -1,6 +1,6 @@
 {
   "name": "@luxai-qtrobot/magpie",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "MAGPIE messaging engine for TypeScript/JavaScript — transport-agnostic streaming and RPC over MQTT/WebSocket",
   "keywords": [
     "mqtt",
@@ -39,10 +39,14 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "example:writer": "tsx examples/mqtt_writer.ts",
-    "example:reader": "tsx examples/mqtt_reader.ts",
-    "example:requester": "tsx examples/mqtt_requester.ts",
-    "example:responder": "tsx examples/mqtt_responder.ts"
+    "example:writer": "tsx examples/mqtt/mqtt_writer.ts",
+    "example:reader": "tsx examples/mqtt/mqtt_reader.ts",
+    "example:requester": "tsx examples/mqtt/mqtt_requester.ts",
+    "example:responder": "tsx examples/mqtt/mqtt_responder.ts",
+    "example:schema:responder": "tsx examples/schema/mqtt_schema_responder.ts",
+    "example:schema:requester": "tsx examples/schema/mqtt_schema_requester.ts",
+    "example:mcp:server": "tsx examples/mcp/mqtt_mcp_server.ts",
+    "example:mcp:client": "tsx examples/mcp/mqtt_mcp_client.ts"
   },
   "dependencies": {
     "@msgpack/msgpack": "^3.0.0",
