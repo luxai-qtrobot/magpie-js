@@ -3,7 +3,7 @@
  *
  * Demonstrates two ways to define and attach handlers:
  *
- *   Way A — load API from JSON string, attach handlers separately
+ *   Way A — load API from a JS array, attach handlers separately
  *   Way B — register with explicit schema + handler together
  *
  * Run this first, then run mqtt_schema_requester.ts.
@@ -12,9 +12,9 @@ import { MqttConnection, MqttRpcResponder } from '../../src/transport/index'
 import { JsonRpcSchema } from '../../src/schema/index'
 import { Logger } from '../../src/utils/logger'
 
-// ── Way A: load API from JSON string (no handlers yet) ─────────────────────
+// ── Way A: load API from a JS array, attach handlers separately ────────────
 
-const MATH_API = JSON.stringify([
+const schema = JsonRpcSchema.fromJSON([
   {
     name: 'add',
     description: 'Add two numbers',
@@ -34,8 +34,6 @@ const MATH_API = JSON.stringify([
     },
   },
 ])
-
-const schema = JsonRpcSchema.fromJsonString(MATH_API)
 
 // ── Attach handlers to pre-defined methods ─────────────────────────────────
 

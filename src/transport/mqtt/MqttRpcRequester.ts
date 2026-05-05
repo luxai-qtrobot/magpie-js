@@ -1,4 +1,4 @@
-import { RpcRequester, AckTimeoutError, ReplyTimeoutError } from '../RpcRequester'
+import { RpcRequester, RpcSchema, AckTimeoutError, ReplyTimeoutError } from '../RpcRequester'
 import { MsgpackSerializer } from '../../serializer/MsgpackSerializer'
 import { BaseSerializer } from '../../serializer/BaseSerializer'
 import { Logger } from '../../utils/logger'
@@ -37,13 +37,14 @@ export class MqttRpcRequester extends RpcRequester {
     connection: MqttConnection,
     serviceName: string,
     options?: {
+      schema?: RpcSchema
       serializer?: BaseSerializer
       ackTimeout?: number
       qos?: 0 | 1 | 2
       name?: string
     }
   ) {
-    super()
+    super(options?.schema)
     this._connection = connection
     this._serializer = options?.serializer ?? new MsgpackSerializer()
     this._ackTimeout = options?.ackTimeout ?? 2.0
@@ -60,7 +61,7 @@ export class MqttRpcRequester extends RpcRequester {
     Logger.debug(`MqttRpcRequester: req='${this._reqTopic}', rep='${this._repTopic}'`)
   }
 
-  async call(request: unknown, timeout?: number): Promise<unknown> {
+  protected async _transportCall(request: unknown, timeout?: number): Promise<unknown> {
     const rid = getUniqueId()
 
     return new Promise<unknown>((resolve, reject) => {

@@ -26,7 +26,7 @@
  *   }
  */
 
-import { RpcRequester, AckTimeoutError, ReplyTimeoutError } from '../RpcRequester'
+import { RpcRequester, RpcSchema, AckTimeoutError, ReplyTimeoutError } from '../RpcRequester'
 import { Logger } from '../../utils/logger'
 import { getUniqueId } from '../../utils/common'
 import { WebRtcConnection } from './WebRtcConnection'
@@ -48,16 +48,16 @@ export class WebRtcRpcRequester extends RpcRequester {
   constructor(
     connection: WebRtcConnection,
     serviceName: string,
-    options?: { ackTimeout?: number },
+    options?: { schema?: RpcSchema; ackTimeout?: number },
   ) {
-    super()
+    super(options?.schema)
     this._connection = connection
     this._serviceName = serviceName.replace(/^\//, '')
     this._ackTimeout = options?.ackTimeout ?? 2.0
     Logger.debug(`WebRtcRpcRequester: ready for service '${this._serviceName}'.`)
   }
 
-  async call(request: unknown, timeout?: number): Promise<unknown> {
+  protected async _transportCall(request: unknown, timeout?: number): Promise<unknown> {
     const rid = getUniqueId()
 
     return new Promise<unknown>((resolve, reject) => {

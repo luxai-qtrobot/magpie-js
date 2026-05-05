@@ -1,4 +1,4 @@
-import { JsonRpcSchema, MethodFunc, RegisterOptions } from './JsonRpcSchema'
+import { JsonRpcSchema, JsonSchemaToolEntry, MethodFunc, RegisterOptions } from './JsonRpcSchema'
 
 export const MCP_PROTOCOL_VERSION = '2024-11-05'
 
@@ -18,12 +18,6 @@ interface ToolEntry {
   outputSchema?: Record<string, unknown>
 }
 
-interface JsonSchemaToolEntry {
-  name?: string
-  description?: string
-  inputSchema?: Record<string, unknown>
-  outputSchema?: Record<string, unknown>
-}
 
 export interface McpSchemaOptions {
   name?: string
@@ -117,33 +111,18 @@ export class McpSchema extends JsonRpcSchema {
   // Load from JSON — accepts {"tools": [...]} wrapper or plain array
   // ----------------------------------------------------------------
 
-  static fromJsonString(s: string, options?: McpSchemaOptions): McpSchema {
-    let data = JSON.parse(s)
-    if (typeof data === 'object' && !Array.isArray(data) && data !== null) {
-      data = (data as Record<string, unknown>).tools ?? []
-    }
-    if (!Array.isArray(data)) throw new TypeError('Expected a JSON array or {"tools": [...]}')
+  /** Load a schema from a parsed JS array (or MCP-style `{ tools: [...] }` object). */
+  static fromJSON(items: JsonSchemaToolEntry[] | { tools: JsonSchemaToolEntry[] }, options?: McpSchemaOptions): McpSchema {
+    const list = Array.isArray(items) ? items : (items.tools ?? [])
     const schema = new McpSchema(options)
-    JsonRpcSchema._loadInto(schema, data as JsonSchemaToolEntry[])
+    JsonRpcSchema._loadInto(schema, list)
     return schema
   }
 
-  static fromJsonFile(path: string, options?: McpSchemaOptions): McpSchema {
-    let _readFileSync: ((p: string, enc: BufferEncoding) => string) | undefined
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      _readFileSync = require('fs').readFileSync
-    } catch { /* browser */ }
-    if (!_readFileSync) throw new Error('fromJsonFile requires a Node.js environment')
-
-    let data = JSON.parse(_readFileSync(path, 'utf8'))
-    if (typeof data === 'object' && !Array.isArray(data) && data !== null) {
-      data = (data as Record<string, unknown>).tools ?? []
-    }
-    if (!Array.isArray(data)) throw new TypeError('Expected a JSON array or {"tools": [...]}')
-    const schema = new McpSchema(options)
-    JsonRpcSchema._loadInto(schema, data as JsonSchemaToolEntry[])
-    return schema
+  /** Load a schema from a JSON string (plain array or `{"tools": [...]}` wrapper). */
+  static fromJsonString(s: string, options?: McpSchemaOptions): McpSchema {
+    const data = JSON.parse(s)
+    return McpSchema.fromJSON(data, options)
   }
 
   // ----------------------------------------------------------------

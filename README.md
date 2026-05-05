@@ -44,7 +44,6 @@ Whether the wire is MQTT or WebRTC, the application layer never changes. Service
 - [Interoperability](#interoperability)
 - [Transport URI Schemes](#transport-uri-schemes)
 - [Examples](#examples)
-- [Project Structure](#project-structure)
 - [Development](#development)
 - [Related Projects](#related-projects)
 - [License](#license)
@@ -380,18 +379,27 @@ await conn.connect(60)
 ```typescript
 import { MqttConnection, MqttRpcResponder, JsonRpcSchema } from '@luxai-qtrobot/magpie'
 
-const schema = new JsonRpcSchema()
+// Way A: define inline as a JS array, attach handlers separately
+const schema = JsonRpcSchema.fromJSON([
+  {
+    name: 'convert',
+    description: 'Convert a value from one unit to another',
+    inputSchema: {
+      type: 'object',
+      properties: { value: { type: 'number' }, from_unit: { type: 'string' }, to_unit: { type: 'string' } },
+      required: ['value', 'from_unit', 'to_unit'],
+    },
+  },
+])
 
-// Way A: load from a standard JSON Schema file, attach handlers separately
-const schema2 = JsonRpcSchema.fromJsonString(API_JSON)
-
-schema2.handler('convert', (p: unknown) => {
+schema.handler('convert', (p: unknown) => {
   const { value, from_unit, to_unit } = p as { value: number; from_unit: string; to_unit: string }
   return { result: value, unit: to_unit }
 })
 
 // Way B: register method with handler together
-schema.register(
+const schema2 = new JsonRpcSchema()
+schema2.register(
   'add',
   (p: unknown) => {
     const { a, b } = p as { a: number; b: number }
@@ -444,30 +452,29 @@ The JSON file uses standard MCP/JSON Schema format. `description` and `outputSch
 ]
 ```
 
-**Requester — proxy interface:**
+**Requester — pass schema to the requester constructor:**
 
 ```typescript
-import { MqttConnection, MqttRpcRequester, JsonRpcSchema, JsonRpcError, createJsonRpcClient } from '@luxai-qtrobot/magpie'
+import { MqttConnection, MqttRpcRequester, JsonRpcSchema, JsonRpcError } from '@luxai-qtrobot/magpie'
 
-const schema = new JsonRpcSchema()
-schema.register('add', null, {
-  inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] },
-})
+const schema = JsonRpcSchema.fromJSON([
+  { name: 'add', inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] } },
+])
 
 const conn = new MqttConnection('mqtt://broker.hivemq.com:1883')
 await conn.connect()
 
-const requester = new MqttRpcRequester(conn, 'myservice/actions')
-const client = createJsonRpcClient(requester, schema)
-
-// Proxy style — method name as property
-const result = await client.add({ a: 3, b: 4 })     // → 7
+// Pass schema to the requester — JSON-RPC wrapping is automatic
+const client = new MqttRpcRequester(conn, 'myservice/actions', { schema })
 
 // Explicit call style
-const result = await client.call('add', { a: 3, b: 4 })
+const result = await client.call('add', { a: 3, b: 4 })       // → 7
 
 // With explicit timeout (seconds)
 const result = await client.call('add', { a: 3, b: 4 }, 5.0)
+
+// Proxy style — method name as property (needs cast; mirrors Python's __getattr__)
+const result = await (client as any).add({ a: 3, b: 4 })
 
 try {
   await client.call('nonexistent')
@@ -598,12 +605,16 @@ const client = new Client({ name: 'my-agent', version: '1.0.0' })
 await client.connect(new McpTransport(requester))
 ```
 
-#### Loading tools from an MCP tool-list file
+#### Loading tools from a JSON string (e.g. fetched from a URL)
 
 ```typescript
 import { McpSchema } from '@luxai-qtrobot/magpie'
 
-const schema = McpSchema.fromJsonFile('tools.json')   // MCP native format
+// fromJSON — from a parsed JS object (plain array or { tools: [...] })
+const schema = McpSchema.fromJSON(toolsList)
+
+// fromJsonString — from a raw JSON string (response.text(), env var, etc.)
+const schema = McpSchema.fromJsonString(await response.text())
 
 schema.handler('translate', (p: unknown) => {
   const { text, target_lang } = p as { text: string; target_lang: string }
@@ -708,40 +719,6 @@ npm run example:schema:requester   # terminal 2
 
 npm run example:mcp:server         # terminal 1
 npm run example:mcp:client         # terminal 2
-```
-
----
-
-## Project Structure
-
-```
-src/
-  serializer/         BaseSerializer, MsgpackSerializer
-  frames/             Frame base + all frame types
-  transport/
-    StreamReader.ts         abstract reader
-    StreamWriter.ts         abstract writer
-    RpcRequester.ts         abstract RPC client
-    RpcResponder.ts         abstract RPC server
-    mqtt/                   MQTT transport (browser + Node.js)
-      MqttConnection.ts
-      MqttStreamWriter.ts
-      MqttStreamReader.ts
-      MqttRpcRequester.ts
-      MqttRpcResponder.ts   accepts { schema? } option
-    webrtc/                 WebRTC transport (browser)
-      WebRtcConnection.ts
-      WebRtcStreamWriter.ts
-      WebRtcStreamReader.ts
-      WebRtcRpcRequester.ts
-      WebRtcRpcResponder.ts accepts { schema? } option
-  schema/
-    BaseSchema.ts           abstract dispatch interface
-    JsonRpcSchema.ts        JSON-RPC 2.0 dispatch + fromJsonString/fromJsonFile + proxy client
-    McpSchema.ts            MCP protocol (initialize, tools/list, tools/call, structuredContent)
-  adapters/
-    mcp/
-      McpTransport.ts       @modelcontextprotocol/sdk-compatible Transport
 ```
 
 ---

@@ -1,7 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
-import { JsonRpcSchema, JsonRpcError, createJsonRpcClient, METHOD_NOT_FOUND, INTERNAL_ERROR } from '../src/schema/JsonRpcSchema'
+import { describe, it, expect } from 'vitest'
+import { JsonRpcSchema, JsonRpcError, METHOD_NOT_FOUND, INTERNAL_ERROR } from '../src/schema/JsonRpcSchema'
 import { McpSchema } from '../src/schema/McpSchema'
-import { RpcRequester } from '../src/transport/RpcRequester'
+import { RpcRequester, RpcSchema } from '../src/transport/RpcRequester'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -134,47 +134,52 @@ describe('JsonRpcSchema register / handler', () => {
 })
 
 // ---------------------------------------------------------------------------
-// JsonRpcSchema — fromJsonString / fromJsonFile
+// JsonRpcSchema — fromJSON / fromJsonString
 // ---------------------------------------------------------------------------
 
-describe('JsonRpcSchema fromJsonString', () => {
-  const API = JSON.stringify([
+describe('JsonRpcSchema fromJSON / fromJsonString', () => {
+  const ITEMS = [
     { name: 'add', description: 'Add two numbers', inputSchema: { type: 'object', properties: { a: { type: 'number' }, b: { type: 'number' } }, required: ['a', 'b'] } },
     { name: 'greet', inputSchema: { type: 'object', properties: { name: { type: 'string' } } } },
-  ])
+  ]
 
-  it('loads methods from JSON string', () => {
-    const schema = JsonRpcSchema.fromJsonString(API)
+  it('fromJSON loads methods from a JS array', () => {
+    const schema = JsonRpcSchema.fromJSON(ITEMS)
     expect(schema['_methods'].has('add')).toBe(true)
     expect(schema['_methods'].has('greet')).toBe(true)
   })
 
-  it('preserves description', () => {
-    const schema = JsonRpcSchema.fromJsonString(API)
+  it('fromJSON preserves description', () => {
+    const schema = JsonRpcSchema.fromJSON(ITEMS)
     expect(schema['_methods'].get('add')!.description).toBe('Add two numbers')
   })
 
-  it('preserves inputSchema', () => {
-    const schema = JsonRpcSchema.fromJsonString(API)
+  it('fromJSON preserves inputSchema', () => {
+    const schema = JsonRpcSchema.fromJSON(ITEMS)
     expect((schema['_methods'].get('add')!.inputSchema as Record<string, unknown>).properties).toBeDefined()
   })
 
-  it('throws for non-array input', () => {
+  it('fromJSON throws for entry missing name', () => {
+    expect(() => JsonRpcSchema.fromJSON([{ description: 'no name' }])).toThrow()
+  })
+
+  it('fromJsonString loads methods from a JSON string', () => {
+    const schema = JsonRpcSchema.fromJsonString(JSON.stringify(ITEMS))
+    expect(schema['_methods'].has('add')).toBe(true)
+  })
+
+  it('fromJsonString throws for non-array input', () => {
     expect(() => JsonRpcSchema.fromJsonString('"not an array"')).toThrow(TypeError)
   })
 
-  it('throws for entry missing name', () => {
-    expect(() => JsonRpcSchema.fromJsonString('[{"description": "no name"}]')).toThrow()
-  })
-
   it('loaded method without handler returns METHOD_NOT_FOUND', async () => {
-    const schema = JsonRpcSchema.fromJsonString(API)
+    const schema = JsonRpcSchema.fromJSON(ITEMS)
     const resp = await schema.dispatch(req('add', { a: 1, b: 2 })) as Record<string, unknown>
     expect((resp.error as Record<string, unknown>).code).toBe(METHOD_NOT_FOUND)
   })
 
   it('works after attaching handler', async () => {
-    const schema = JsonRpcSchema.fromJsonString(API)
+    const schema = JsonRpcSchema.fromJSON(ITEMS)
     schema.handler('add', (p: unknown) => {
       const { a, b } = p as { a: number; b: number }
       return a + b
@@ -224,55 +229,81 @@ describe('JsonRpcSchema wrap/unwrap', () => {
 })
 
 // ---------------------------------------------------------------------------
-// createJsonRpcClient — proxy
+// RpcRequester — schema mode
 // ---------------------------------------------------------------------------
 
-describe('createJsonRpcClient', () => {
-  function makeMockRequester(responseFactory: (req: unknown) => unknown): RpcRequester {
-    return {
-      call: vi.fn(async (request: unknown) => responseFactory(request)),
-      close: vi.fn(),
-    } as unknown as RpcRequester
+class MockRpcRequester extends RpcRequester {
+  lastRequest: unknown = undefined
+  private _nextResponse: unknown
+
+  constructor(nextResponse: unknown, schema?: RpcSchema | null) {
+    super(schema)
+    this._nextResponse = nextResponse
   }
 
-  it('call() wraps, sends, and unwraps', async () => {
+  setResponse(r: unknown): void { this._nextResponse = r }
+
+  protected async _transportCall(request: unknown): Promise<unknown> {
+    this.lastRequest = request
+    return this._nextResponse
+  }
+
+  close(): void {}
+}
+
+describe('RpcRequester schema mode', () => {
+  it('call() wraps method name in JSON-RPC envelope when schema is set', async () => {
     const schema = new JsonRpcSchema()
     schema.register('add')
-    const mockReq = makeMockRequester(() => ({ jsonrpc: '2.0', result: 7, id: 1 }))
-    const client = createJsonRpcClient(mockReq, schema)
-    const result = await client.call('add', { a: 3, b: 4 })
+    const mock = new MockRpcRequester({ jsonrpc: '2.0', result: 7, id: 1 }, schema)
+    await mock.call('add', { a: 3, b: 4 })
+    const sent = mock.lastRequest as Record<string, unknown>
+    expect(sent.jsonrpc).toBe('2.0')
+    expect(sent.method).toBe('add')
+    expect(sent.params).toEqual({ a: 3, b: 4 })
+  })
+
+  it('call() unwraps result when schema is set', async () => {
+    const schema = new JsonRpcSchema()
+    schema.register('add')
+    const mock = new MockRpcRequester({ jsonrpc: '2.0', result: 7, id: 1 }, schema)
+    const result = await mock.call('add', { a: 3, b: 4 })
     expect(result).toBe(7)
   })
 
-  it('proxy intercepts unknown property as method call', async () => {
+  it('call() with schema accepts timeout as second arg (no params)', async () => {
+    const schema = new JsonRpcSchema()
+    schema.register('ping')
+    const mock = new MockRpcRequester({ jsonrpc: '2.0', result: 'pong', id: 1 }, schema)
+    const result = await mock.call('ping', 5.0)
+    expect(result).toBe('pong')
+  })
+
+  it('proxy style: requester.methodName(params) routes through schema', async () => {
     const schema = new JsonRpcSchema()
     schema.register('add')
-    const mockReq = makeMockRequester(() => ({ jsonrpc: '2.0', result: 9, id: 1 }))
-    const client = createJsonRpcClient(mockReq, schema)
-    // client.add is intercepted by Proxy
-    const result = await client.add({ a: 4, b: 5 })
+    const mock = new MockRpcRequester({ jsonrpc: '2.0', result: 9, id: 1 }, schema)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const result = await (mock as any).add({ a: 4, b: 5 })
     expect(result).toBe(9)
-    expect(mockReq.call).toHaveBeenCalledTimes(1)
+    expect((mock.lastRequest as Record<string, unknown>).method).toBe('add')
   })
 
-  it('close() delegates to requester', () => {
-    const schema = new JsonRpcSchema()
-    const mockReq = makeMockRequester(() => null)
-    const client = createJsonRpcClient(mockReq, schema)
-    client.close()
-    expect(mockReq.close).toHaveBeenCalled()
-  })
-
-  it('throws JsonRpcError on error response', async () => {
+  it('throws JsonRpcError when schema response contains error', async () => {
     const schema = new JsonRpcSchema()
     schema.register('fail')
-    const mockReq = makeMockRequester(() => ({
-      jsonrpc: '2.0',
-      error: { code: -32601, message: 'not found' },
-      id: 1,
-    }))
-    const client = createJsonRpcClient(mockReq, schema)
-    await expect(client.call('fail')).rejects.toThrow(JsonRpcError)
+    const mock = new MockRpcRequester(
+      { jsonrpc: '2.0', error: { code: -32601, message: 'not found' }, id: 1 },
+      schema,
+    )
+    await expect(mock.call('fail')).rejects.toThrow(JsonRpcError)
+  })
+
+  it('raw call() passes through without schema', async () => {
+    const mock = new MockRpcRequester({ raw: 'response' })
+    const result = await mock.call({ key: 'val' })
+    expect(result).toEqual({ raw: 'response' })
+    expect((mock.lastRequest as Record<string, unknown>).key).toBe('val')
   })
 })
 
@@ -434,11 +465,11 @@ describe('McpSchema structuredContent', () => {
 })
 
 // ---------------------------------------------------------------------------
-// McpSchema — fromJsonString / fromJsonFile
+// McpSchema — fromJSON / fromJsonString
 // ---------------------------------------------------------------------------
 
-describe('McpSchema fromJsonString', () => {
-  const MCP_TOOLS = JSON.stringify([
+describe('McpSchema fromJSON / fromJsonString', () => {
+  const MCP_ITEMS = [
     {
       name: 'translate',
       description: 'Translate text',
@@ -450,29 +481,39 @@ describe('McpSchema fromJsonString', () => {
       inputSchema: { type: 'object' },
       outputSchema: { type: 'object', properties: { version: { type: 'string' } } },
     },
-  ])
+  ]
 
-  it('loads from plain array', () => {
-    const schema = McpSchema.fromJsonString(MCP_TOOLS)
+  it('fromJSON loads from a plain JS array', () => {
+    const schema = McpSchema.fromJSON(MCP_ITEMS)
     expect(schema['_tools'].has('translate')).toBe(true)
     expect(schema['_tools'].has('get_info')).toBe(true)
   })
 
-  it('loads from {"tools": [...]} wrapper', () => {
-    const schema = McpSchema.fromJsonString(JSON.stringify({ tools: JSON.parse(MCP_TOOLS) }))
+  it('fromJSON loads from {"tools": [...]} object', () => {
+    const schema = McpSchema.fromJSON({ tools: MCP_ITEMS })
     expect(schema['_tools'].has('translate')).toBe(true)
   })
 
-  it('accepts name and version options', async () => {
-    const schema = McpSchema.fromJsonString(MCP_TOOLS, { name: 'mybot', version: '2.0' })
+  it('fromJSON accepts name and version options', async () => {
+    const schema = McpSchema.fromJSON(MCP_ITEMS, { name: 'mybot', version: '2.0' })
     const resp = await schema.dispatch(req('initialize', {})) as Record<string, unknown>
     const info = (resp.result as Record<string, unknown>).serverInfo as Record<string, unknown>
     expect(info.name).toBe('mybot')
     expect(info.version).toBe('2.0')
   })
 
+  it('fromJsonString loads from a JSON string', () => {
+    const schema = McpSchema.fromJsonString(JSON.stringify(MCP_ITEMS))
+    expect(schema['_tools'].has('translate')).toBe(true)
+  })
+
+  it('fromJsonString loads from {"tools": [...]} JSON string', () => {
+    const schema = McpSchema.fromJsonString(JSON.stringify({ tools: MCP_ITEMS }))
+    expect(schema['_tools'].has('translate')).toBe(true)
+  })
+
   it('object outputSchema is exposed in tools/list', async () => {
-    const schema = McpSchema.fromJsonString(MCP_TOOLS)
+    const schema = McpSchema.fromJSON(MCP_ITEMS)
     const resp = await schema.dispatch(req('tools/list', {})) as Record<string, unknown>
     const tools = Object.fromEntries(
       ((resp.result as Record<string, unknown>).tools as Record<string, unknown>[]).map(t => [t.name, t])
@@ -482,13 +523,13 @@ describe('McpSchema fromJsonString', () => {
   })
 
   it('tool without handler returns isError:true on call', async () => {
-    const schema = McpSchema.fromJsonString(MCP_TOOLS)
+    const schema = McpSchema.fromJSON(MCP_ITEMS)
     const resp = await schema.dispatch(req('tools/call', { name: 'translate', arguments: { text: 'Hi' } })) as Record<string, unknown>
     expect((resp.result as Record<string, unknown>).isError).toBe(true)
   })
 
   it('handler() attaches implementation and tool works', async () => {
-    const schema = McpSchema.fromJsonString(MCP_TOOLS)
+    const schema = McpSchema.fromJSON(MCP_ITEMS)
     schema.handler('translate', (p: unknown) => {
       const { text } = p as { text: string }
       return { translated: `[en] ${text}` }

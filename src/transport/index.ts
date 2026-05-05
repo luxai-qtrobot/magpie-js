@@ -1,6 +1,7 @@
 export { StreamWriter } from './StreamWriter'
 export { StreamReader } from './StreamReader'
 export { RpcRequester, AckTimeoutError, ReplyTimeoutError } from './RpcRequester'
+export type { RpcSchema } from './RpcRequester'
 export { RpcResponder } from './RpcResponder'
 export type { RequestHandler } from './RpcResponder'
 

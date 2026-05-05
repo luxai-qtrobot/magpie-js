@@ -1,5 +1,4 @@
 import { BaseSchema } from './BaseSchema'
-import { RpcRequester } from '../transport/RpcRequester'
 
 // Standard JSON-RPC 2.0 error codes
 export const PARSE_ERROR      = -32700
@@ -17,13 +16,6 @@ export class JsonRpcError extends Error {
   }
 }
 
-// Lazy-load fs for Node.js environments (not available in browser)
-let _readFileSync: ((path: string, encoding: BufferEncoding) => string) | undefined
-try {
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  _readFileSync = require('fs').readFileSync
-} catch { /* browser environment */ }
-
 export type MethodFunc = (params?: unknown) => unknown | Promise<unknown>
 
 export interface MethodEntry {
@@ -39,45 +31,11 @@ export interface RegisterOptions {
   outputSchema?: Record<string, unknown> | null
 }
 
-interface JsonSchemaToolEntry {
+export interface JsonSchemaToolEntry {
   name?: string
   description?: string
   inputSchema?: Record<string, unknown>
   outputSchema?: Record<string, unknown>
-}
-
-// ------------------------------------------------------------------
-// Proxy client returned by createJsonRpcClient()
-// ------------------------------------------------------------------
-
-export type JsonRpcProxy = {
-  call(method: string, params?: Record<string, unknown>, timeout?: number): Promise<unknown>
-  close(): void
-} & Record<string, (params?: Record<string, unknown>, timeout?: number) => Promise<unknown>>
-
-export function createJsonRpcClient(
-  requester: RpcRequester,
-  schema: JsonRpcSchema,
-): JsonRpcProxy {
-  const base = {
-    async call(method: string, params?: Record<string, unknown>, timeout?: number): Promise<unknown> {
-      const envelope = schema.wrap(method, params)
-      const response = await requester.call(envelope, timeout)
-      return schema.unwrap(response)
-    },
-    close(): void {
-      requester.close()
-    },
-  }
-
-  return new Proxy(base as JsonRpcProxy, {
-    get(target, prop: string | symbol) {
-      if (typeof prop !== 'string') return undefined
-      if (prop in target) return (target as Record<string, unknown>)[prop]
-      return (params?: Record<string, unknown>, timeout?: number) =>
-        target.call(prop, params, timeout)
-    },
-  })
 }
 
 // ------------------------------------------------------------------
@@ -101,14 +59,12 @@ export class JsonRpcSchema extends BaseSchema {
     })
   }
 
-  /**
-   * Attach an implementation to an already-defined method (loaded via fromJsonString / fromJsonFile).
-   */
+  /** Attach an implementation to an already-defined method (loaded via fromJSON / fromJsonString). */
   handler(name: string, func: MethodFunc): void {
     const entry = this._methods.get(name)
     if (!entry) {
       throw new Error(
-        `'${name}' is not defined in this schema. Call register() or fromJsonString() first.`,
+        `'${name}' is not defined in this schema. Call register() or fromJSON() first.`,
       )
     }
     entry.func = func
@@ -129,27 +85,21 @@ export class JsonRpcSchema extends BaseSchema {
     }
   }
 
+  /** Load a schema from a parsed JS array of method objects. */
+  static fromJSON(items: JsonSchemaToolEntry[]): JsonRpcSchema {
+    const schema = new JsonRpcSchema()
+    JsonRpcSchema._loadInto(schema, items)
+    return schema
+  }
+
   /**
    * Load a schema from a JSON string.
-   * Expected format — a JSON array of method objects:
-   * [{ "name": "add", "description": "...", "inputSchema": {...}, "outputSchema": {...} }]
+   * Expected format: [{ "name": "add", "description": "...", "inputSchema": {...} }]
    */
   static fromJsonString(s: string): JsonRpcSchema {
     const data = JSON.parse(s)
     if (!Array.isArray(data)) throw new TypeError('Expected a JSON array of method objects')
-    const schema = new JsonRpcSchema()
-    JsonRpcSchema._loadInto(schema, data as JsonSchemaToolEntry[])
-    return schema
-  }
-
-  /** Load a schema from a JSON file (Node.js only). */
-  static fromJsonFile(path: string): JsonRpcSchema {
-    if (!_readFileSync) throw new Error('fromJsonFile requires a Node.js environment')
-    const data = JSON.parse(_readFileSync(path, 'utf8'))
-    if (!Array.isArray(data)) throw new TypeError('Expected a JSON array of method objects')
-    const schema = new JsonRpcSchema()
-    JsonRpcSchema._loadInto(schema, data as JsonSchemaToolEntry[])
-    return schema
+    return JsonRpcSchema.fromJSON(data as JsonSchemaToolEntry[])
   }
 
   // ----------------------------------------------------------------
