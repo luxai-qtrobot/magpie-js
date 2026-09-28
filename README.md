@@ -58,7 +58,7 @@ Whether the wire is MQTT or WebRTC, the application layer never changes. Service
 - **Schema-based RPC** — JSON-RPC 2.0 dispatch via `JsonRpcSchema`; define your API once, call methods by name with the proxy interface (`client.add({ a: 3, b: 4 })`)
 - **MCP support out of the box** — `McpSchema` turns any MAGPIE RPC responder into a fully compliant MCP tool server; `McpTransport` lets any `@modelcontextprotocol/sdk` `Client` call those tools over MQTT or WebRTC
 - **MQTT transport** — full streaming and RPC over MQTT; supports `mqtt://`, `mqtts://`, `ws://`, `wss://`, auth, LWT, and auto-reconnect; works in browser and Node.js
-- **WebRTC transport** — P2P streaming, video/audio, and RPC in the browser; MQTT used only for the initial signaling handshake; STUN + optional TURN for NAT traversal
+- **WebRTC transport** — P2P streaming, video/audio, and RPC in the browser; MQTT or HTTP signaling; STUN + optional TURN for NAT traversal
 - **Typed frames** — `ImageFrameJpeg`, `AudioFrameRaw`, `DictFrame`, and more; wire-compatible with Python and C++
 - **Fast serialization** — msgpack by default; bring your own serializer via the abstract interface
 - **Browser + Node.js** — one package, works everywhere; MQTT works on both, WebRTC is browser-native
@@ -244,9 +244,23 @@ await conn.connect()
 
 ### WebRTC Streaming
 
-WebRTC enables **P2P communication over the internet** — no broker in the data path after the initial signaling handshake. Signaling is exchanged via MQTT.
+WebRTC enables **P2P communication over the internet** — no broker in the data path after the initial signaling handshake. Signaling can use MQTT or the shared HTTP relay protocol.
 
 > **Browser only:** WebRTC uses native browser APIs (`RTCPeerConnection`). This transport is not available in Node.js.
+
+For HTTP signaling, start the example Node server (`npm install --no-save express cors`, then `node examples/webrtc/http_signaling_server.cjs`) or use the Python example server. The server does not import MAGPIE. In the browser messaging and video demos, enter `http://127.0.0.1:8000/signal` in the signaling URL field; the demo selects HTTP automatically. Both peers must use the same session ID. The browser page must be served over HTTP or HTTPS, and the signaling server must allow its origin via CORS.
+
+```javascript
+const conn = await WebRtcConnection.withHttp('https://signal.example.com/webrtc', 'my-node', {
+  headers: { 'X-Tenant': 'my-team' },
+  headersProvider: async () => ({ Authorization: `Bearer ${await getToken()}` }),
+  reconnect: true,
+  webrtcOptions: { videoTopics: ['/camera/color/image'] },
+})
+await conn.connect(60)
+```
+
+The URL prefix is chosen by the server. `headersProvider` runs before each request, and `credentials: 'include'` can be supplied when the server uses cookies. The copyable [Node relay helper](examples/webrtc/http_signaling/README.md) documents the wire contract and how to mount it in another application.
 
 **Writer:**
 
@@ -673,8 +687,10 @@ Any combination of Python, C++, and JavaScript nodes communicate directly — no
 | `mqtts://host:8883` | MQTT over TLS | Node.js |
 | `ws://host:8000/mqtt` | MQTT over WebSocket | Browser |
 | `wss://host:8884/mqtt` | MQTT over WebSocket + TLS | Browser (recommended) |
+| `http://host/signal` | WebRTC HTTP signaling relay | Browser (local development) |
+| `https://host/signal` | WebRTC HTTP signaling relay over TLS | Browser |
 
-WebRTC signaling uses the same MQTT connection; peer-to-peer data and media flow directly between peers.
+WebRTC signaling can use MQTT over WebSocket or an HTTP relay; peer-to-peer data and media flow directly between peers.
 
 ---
 
@@ -710,6 +726,12 @@ WebRTC signaling uses the same MQTT connection; peer-to-peer data and media flow
 | [`examples/browser/mqtt/demo.js`](examples/browser/mqtt/demo.js) | MQTT streaming + RPC in the browser |
 | [`examples/browser/webrtc/messaging.js`](examples/browser/webrtc/messaging.js) | WebRTC data channel messaging |
 | [`examples/browser/webrtc/video.js`](examples/browser/webrtc/video.js) | WebRTC live video + audio |
+
+### WebRTC HTTP signaling server
+
+| Example | Description |
+|---|---|
+| [`examples/webrtc/http_signaling_server.cjs`](examples/webrtc/http_signaling_server.cjs) | Express server using the copyable, MAGPIE-independent relay helper |
 
 Run Node.js examples:
 

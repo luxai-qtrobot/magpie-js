@@ -1,5 +1,7 @@
 export type { WebRtcOptions, WebRtcTurnServer } from './WebRtcOptions'
 export { WebRtcSignaler, MqttSignaler } from './WebRtcSignaler'
+export { HttpSignaler } from './HttpSignaler'
+export type { HttpSignalerOptions } from './HttpSignaler'
 export { WebRtcConnection } from './WebRtcConnection'
 export { WebRtcStreamWriter } from './WebRtcStreamWriter'
 export { WebRtcStreamReader } from './WebRtcStreamReader'

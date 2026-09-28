@@ -7,7 +7,7 @@
  *   and RPC components — mirroring MqttConnection.
  * - Uses the browser's native RTCPeerConnection; no extra dependencies needed.
  * - Signaling (SDP offer/answer + ICE candidates) is exchanged via a
- *   WebRtcSignaler — use MqttSignaler for internet connectivity.
+ *   WebRtcSignaler — use MQTT or HTTP for internet connectivity.
  * - Role (offer vs answer) is auto-negotiated: both peers broadcast a "hello"
  *   message that includes their topic lists; the peer with the lexicographically
  *   higher peerId creates the offer using the union of both sides' topics.
@@ -35,6 +35,7 @@ import { getUniqueId } from '../../utils/common'
 import { MqttOptions } from '../mqtt/MqttOptions'
 import { WebRtcOptions, WebRtcTurnServer } from './WebRtcOptions'
 import { WebRtcSignaler, MqttSignaler } from './WebRtcSignaler'
+import { HttpSignaler, HttpSignalerOptions } from './HttpSignaler'
 
 type PubCallback = (payload: unknown, topic: string) => void
 type RpcCallback = (msg: unknown) => void
@@ -196,6 +197,27 @@ export class WebRtcConnection {
       reconnect: options?.reconnect ?? false,
       webrtcOptions: options?.webrtcOptions,
     })
+  }
+
+  /** Join a generic HTTP mailbox relay using the Python-compatible wire contract. */
+  static async withHttp(
+    baseUrl: string,
+    sessionId: string,
+    options?: HttpSignalerOptions & {
+      reconnect?: boolean
+      webrtcOptions?: WebRtcOptions
+    },
+  ): Promise<WebRtcConnection> {
+    const signaler = await HttpSignaler.create(baseUrl, sessionId, options)
+    try {
+      return new WebRtcConnection(signaler, {
+        reconnect: options?.reconnect ?? false,
+        webrtcOptions: options?.webrtcOptions,
+      })
+    } catch (error) {
+      await signaler.disconnect()
+      throw error
+    }
   }
 
   // ---- Public API ---------------------------------------------------------

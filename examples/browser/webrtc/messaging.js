@@ -52,22 +52,25 @@ function setStatus(state) {
 async function toggleConnect() {
   if (conn) { await cleanup(); return }
 
-  const broker    = document.getElementById('broker-uri').value.trim()
+  const signalUrl = document.getElementById('broker-uri').value.trim()
   const sessionId = document.getElementById('session-id').value.trim()
   const noStun    = document.getElementById('no-stun').checked
 
-  if (!broker || !sessionId) { alert('Please enter broker URL and session ID.'); return }
+  if (!signalUrl || !sessionId) { alert('Please enter signaling URL and session ID.'); return }
 
   setStatus('connecting')
-  document.getElementById('status-text').textContent = 'Connecting to broker…'
+  document.getElementById('status-text').textContent = 'Connecting to signaling server…'
 
   try {
-    conn = await WebRtcConnection.withMqtt(broker, sessionId, {
+    const options = {
       reconnect: true,
       webrtcOptions: noStun ? { stunServers: [] } : undefined,
-    })
+    }
+    conn = /^https?:\/\//i.test(signalUrl)
+      ? await WebRtcConnection.withHttp(signalUrl, sessionId, options)
+      : await WebRtcConnection.withMqtt(signalUrl, sessionId, options)
   } catch (err) {
-    alert(`Broker connection failed: ${err.message}`)
+    alert(`Signaling connection failed: ${err.message}`)
     conn = null
     setStatus('disconnected')
     return
