@@ -15,6 +15,9 @@
   <a href="https://www.npmjs.com/package/@luxai-qtrobot/magpie">
     <img src="https://img.shields.io/badge/platform-browser%20%7C%20node.js-blue" alt="Platform"/>
   </a>
+  <a href="https://luxai-qtrobot.github.io/magpie-doc/">
+    <img src="https://img.shields.io/badge/docs-MAGPIE-118e78" alt="MAGPIE documentation"/>
+  </a>
 </p>
 
 ---
@@ -156,6 +159,8 @@ server.onRequest((request) => {
   return { status: 'ok', echo: request }
 })
 ```
+
+`onRequest(handler)` registers a handler for every request and returns immediately. This is the JavaScript responder operation; Python and C++ use a blocking `respond()` call for one request at a time.
 
 **Requester:**
 

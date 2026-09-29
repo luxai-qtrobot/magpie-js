@@ -7,6 +7,7 @@ export type RequestHandler = (request: unknown) => unknown | Promise<unknown>
 export abstract class RpcResponder {
   /**
    * Register a handler that is called for every incoming request.
+   * Unlike Python/C++ respond(), this event-driven method does not wait for one request.
    * The handler's return value is sent back as the response.
    * The handler may be sync or async.
    */
