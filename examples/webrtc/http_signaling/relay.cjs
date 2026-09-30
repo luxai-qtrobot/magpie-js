@@ -3,6 +3,7 @@
 class Mailbox {
   constructor() {
     this.messages = [] // [sequence, opaque Buffer]
+    this.announcement = null // latest opaque join announcement
     this.nextSequence = 1
     this.seenIds = new Set()
     this.seenOrder = []
@@ -38,13 +39,31 @@ class InMemoryRelay {
     }
   }
 
-  join(session, peer) {
+  _enqueue(box, payload) {
+    const message = [box.nextSequence++, Buffer.from(payload)]
+    box.messages.push(message)
+    for (const waiter of box.waiters) waiter(message)
+  }
+
+  join(session, peer, announcement = Buffer.alloc(0)) {
     this._prune()
     let room = this.rooms.get(session)
     if (!room) { room = new Map(); this.rooms.set(session, room) }
-    if (!room.has(peer) && room.size >= 2) return false
-    if (!room.has(peer)) room.set(peer, new Mailbox())
-    room.get(peer).lastSeen = Date.now()
+    let box = room.get(peer)
+    if (!box) {
+      box = new Mailbox()
+      room.set(peer, box)
+      for (const [otherPeer, otherBox] of room) {
+        if (otherPeer !== peer && otherBox.announcement) this._enqueue(box, otherBox.announcement)
+      }
+    }
+    box.lastSeen = Date.now()
+    if (announcement.length && (!box.announcement || !box.announcement.equals(announcement))) {
+      box.announcement = Buffer.from(announcement)
+      for (const [otherPeer, otherBox] of room) {
+        if (otherPeer !== peer) this._enqueue(otherBox, box.announcement)
+      }
+    }
     return true
   }
 
@@ -67,9 +86,7 @@ class InMemoryRelay {
     if (!sender.remember(messageId)) return true
     for (const [otherPeer, box] of room) {
       if (otherPeer === peer) continue
-      const message = [box.nextSequence++, Buffer.from(payload)]
-      box.messages.push(message)
-      for (const waiter of box.waiters) waiter(message)
+      this._enqueue(box, payload)
     }
     return true
   }
@@ -119,7 +136,11 @@ class SignalingHTTP {
     const peer = parts[3]
     const messages = parts.length === 5
     if (method === 'PUT' && !messages) {
-      return { status: this.relay.join(session, peer) ? 204 : 409 }
+      if (body.length > this.maxMessageBytes) return { status: 413 }
+      return {
+        status: this.relay.join(session, peer, body) ? 204 : 409,
+        headers: { 'X-Magpie-Join-Announcements': '1' },
+      }
     }
     if (method === 'DELETE' && !messages) {
       this.relay.leave(session, peer)

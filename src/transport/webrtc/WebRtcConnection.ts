@@ -1,10 +1,10 @@
 /**
- * WebRtcConnection — shared WebRTC peer connection for MAGPIE (browser).
+ * WebRtcConnection — one public MAGPIE connection spanning browser peers.
  *
  * Architecture overview
  * ---------------------
- * - One WebRtcConnection per peer pair, shared by all publishers, subscribers,
- *   and RPC components — mirroring MqttConnection.
+ * - A private peer connection is created for each remote participant; the
+ *   public connection shares publishers, subscribers and RPC across them.
  * - Uses the browser's native RTCPeerConnection; no extra dependencies needed.
  * - Signaling (SDP offer/answer + ICE candidates) is exchanged via a
  *   WebRtcSignaler — use MQTT or HTTP for internet connectivity.
@@ -47,7 +47,7 @@ function _unionTopics(own: string[], remote: string[]): string[] {
 }
 
 
-export class WebRtcConnection {
+class PeerWebRtcConnection {
   // ---- Identity -----------------------------------------------------------
   readonly sessionId: string
   private _peerId: string
@@ -118,6 +118,8 @@ export class WebRtcConnection {
   private _connectResolve: ((value: boolean) => void) | null = null
   private _connectTimer: ReturnType<typeof setTimeout> | null = null
   private _helloTimer: ReturnType<typeof setTimeout> | null = null
+  private readonly _onReady?: (ready: boolean) => void
+  wasDataReady = false
 
   // ---- Data-channel message routing ---------------------------------------
   private _pubCallbacks = new Map<string, Set<PubCallback>>()
@@ -134,12 +136,15 @@ export class WebRtcConnection {
     options?: {
       reconnect?: boolean
       webrtcOptions?: WebRtcOptions
+      peerId?: string
+      onReady?: (ready: boolean) => void
     },
   ) {
     this._signaler = signaler
     this._reconnect = options?.reconnect ?? false
     this.sessionId = signaler.sessionId
-    this._peerId = getUniqueId().slice(0, 12)
+    this._peerId = options?.peerId ?? getUniqueId().slice(-16)
+    this._onReady = options?.onReady
     this._boundSignalHandler = this._onSignalMessage.bind(this)
 
     const o = options?.webrtcOptions ?? {}
@@ -158,72 +163,14 @@ export class WebRtcConnection {
     Logger.debug(`WebRtcConnection: peerId=${this._peerId}, sessionId=${this.sessionId}`)
   }
 
-  // ---- Static factories ---------------------------------------------------
-
-  /**
-   * Create a WebRtcConnection using MQTT as the signaling transport.
-   * This is the standard factory for browser use over the internet.
-   *
-   * @param brokerUrl  MQTT broker URI. Use wss:// in the browser, e.g.
-   *                   wss://broker.hivemq.com:8884/mqtt
-   * @param sessionId  Shared rendezvous name — must match the remote peer.
-   * @param options    Optional MQTT auth, WebRTC ICE config, reconnect flag.
-   *
-   * Example:
-   *   const conn = await WebRtcConnection.withMqtt(
-   *     'wss://broker.hivemq.com:8884/mqtt', 'my-robot',
-   *     { webrtcOptions: { videoTopics: ['/camera/color/image'] } }
-   *   )
-   *   await conn.connect(30)
-   *   const track = await conn.receiveVideoTrack('/camera/color/image')
-   */
-  static async withMqtt(
-    brokerUrl: string,
-    sessionId: string,
-    options?: {
-      clientId?: string
-      timeout?: number
-      mqttOptions?: MqttOptions
-      reconnect?: boolean
-      webrtcOptions?: WebRtcOptions
-    },
-  ): Promise<WebRtcConnection> {
-    const signaler = await MqttSignaler.create(brokerUrl, sessionId, {
-      ...options?.mqttOptions,
-      clientId: options?.clientId,
-      timeout: options?.timeout,
-    })
-    return new WebRtcConnection(signaler, {
-      reconnect: options?.reconnect ?? false,
-      webrtcOptions: options?.webrtcOptions,
-    })
-  }
-
-  /** Join a generic HTTP mailbox relay using the Python-compatible wire contract. */
-  static async withHttp(
-    baseUrl: string,
-    sessionId: string,
-    options?: HttpSignalerOptions & {
-      reconnect?: boolean
-      webrtcOptions?: WebRtcOptions
-    },
-  ): Promise<WebRtcConnection> {
-    const signaler = await HttpSignaler.create(baseUrl, sessionId, options)
-    try {
-      return new WebRtcConnection(signaler, {
-        reconnect: options?.reconnect ?? false,
-        webrtcOptions: options?.webrtcOptions,
-      })
-    } catch (error) {
-      await signaler.disconnect()
-      throw error
-    }
-  }
-
   // ---- Public API ---------------------------------------------------------
 
   get peerId(): string { return this._peerId }
   get isConnected(): boolean { return this._connected }
+  get isDataReady(): boolean { return this._dataChannel?.readyState === 'open' }
+  _deliverSignal(payload: Uint8Array): void {
+    ;(this._signaler as PeerSignaler).deliver(payload)
+  }
   /** Whether native WebRTC media tracks are used for video/audio (vs data channel). */
   get useMediaChannels(): boolean { return this._opts.useMediaChannels }
   /** JPEG quality (1–100) used when compressing frames sent over the data channel. */
@@ -477,6 +424,7 @@ export class WebRtcConnection {
         // _resolveConnect(true) is called from _setupDataChannel's onopen
       } else if (state === 'failed' || state === 'disconnected' || state === 'closed') {
         this._connected = false
+        this._onReady?.(false)
         this._resolveConnect(false)
         if (this._reconnect && !this._closing) {
           Logger.info(
@@ -643,19 +591,26 @@ export class WebRtcConnection {
 
     dc.onopen = () => {
       Logger.debug(`WebRtcConnection(${this._peerId}): data channel open.`)
+      this.wasDataReady = true
       // Resolve connect() here — mirrors Python: connect() only returns once
       // the data channel is ready to send, not just when ICE is established.
       this._resolveConnect(true)
+      this._onReady?.(true)
     }
 
     // Answerer: ondatachannel may fire when the channel is already open,
     // in which case onopen never fires — handle it immediately.
     if (dc.readyState === 'open') {
       Logger.debug(`WebRtcConnection(${this._peerId}): data channel already open.`)
+      this.wasDataReady = true
       this._resolveConnect(true)
+      this._onReady?.(true)
     }
 
-    dc.onclose = () => Logger.debug(`WebRtcConnection(${this._peerId}): data channel closed.`)
+    dc.onclose = () => {
+      Logger.debug(`WebRtcConnection(${this._peerId}): data channel closed.`)
+      this._onReady?.(false)
+    }
 
     dc.onmessage = (event) => {
       try {
@@ -948,11 +903,421 @@ export class WebRtcConnection {
     this._mediaSendScheduled = false
 
     // New peer_id so both sides re-run role negotiation cleanly
-    this._peerId = getUniqueId().slice(0, 12)
+    this._peerId = getUniqueId().slice(-16)
     Logger.debug(`WebRtcConnection: reconnecting with new peerId=${this._peerId}`)
 
     this._connectInner().catch(e =>
       Logger.warning(`WebRtcConnection: reconnect error: ${e}`)
     )
+  }
+}
+
+
+type PeerRole = 'mesh' | 'host' | 'client'
+
+/** A private, addressed view of a shared signaling room. */
+class PeerSignaler extends WebRtcSignaler {
+  private _callback: ((payload: Uint8Array) => void) | null = null
+
+  constructor(
+    private readonly owner: WebRtcConnection,
+    private readonly remotePeerId: string,
+  ) { super() }
+
+  get sessionId(): string { return this.owner.sessionId }
+
+  publish(payload: Uint8Array): void {
+    const message = this.owner._decodeSignal(payload)
+    message['to_peer_id'] = this.remotePeerId
+    message['role'] = this.owner.role
+    this.owner._publishSignal(message)
+  }
+
+  subscribe(callback: (payload: Uint8Array) => void): void { this._callback = callback }
+  unsubscribe(): void { this._callback = null }
+  async disconnect(): Promise<void> { this._callback = null }
+  deliver(payload: Uint8Array): void { this._callback?.(payload) }
+}
+
+/**
+ * A shared MAGPIE connection backed by one WebRTC peer connection per remote.
+ * connect() resolves when the first peer is ready; later peers join dynamically.
+ */
+export class WebRtcConnection {
+  readonly sessionId: string
+  readonly role: PeerRole
+  private readonly _peerId = getUniqueId().slice(-16)
+  private readonly _serializer = new MsgpackSerializer()
+  private readonly _peers = new Map<string, PeerWebRtcConnection>()
+  private readonly _pubCallbacks = new Map<string, Set<PubCallback>>()
+  private readonly _rpcServices = new Map<string, RpcCallback>()
+  private readonly _rpcReplies = new Map<string, RpcCallback>()
+  private readonly _rpcOrigins = new Map<string, string>()
+  private readonly _restartIds = new Map<string, string>()
+  private readonly _localVideoTracks = new Map<string, MediaStreamTrack>()
+  private readonly _localAudioTracks = new Map<string, MediaStreamTrack>()
+  private readonly _videoWaiters = new Map<string, Array<{ peerId?: string; resolve: (track: MediaStreamTrack) => void }>>()
+  private readonly _audioWaiters = new Map<string, Array<{ peerId?: string; resolve: (track: MediaStreamTrack) => void }>>()
+  private readonly _videoTopics: string[]
+  private readonly _audioTopics: string[]
+  private readonly _webrtcOptions: WebRtcOptions
+  private readonly _reconnect: boolean
+  private _started = false
+  private _closed = false
+  private _everConnected = false
+  private _discoveryTimer: ReturnType<typeof setInterval> | null = null
+  private _connectPromise: Promise<boolean> | null = null
+  private _connectResolve: ((ready: boolean) => void) | null = null
+  private _connectTimer: ReturnType<typeof setTimeout> | null = null
+
+  constructor(
+    private readonly _signaler: WebRtcSignaler,
+    options?: { reconnect?: boolean; webrtcOptions?: WebRtcOptions; role?: PeerRole },
+  ) {
+    this.sessionId = _signaler.sessionId
+    this._reconnect = options?.reconnect ?? false
+    this._webrtcOptions = options?.webrtcOptions ?? {}
+    this._videoTopics = [...(this._webrtcOptions.videoTopics ?? [])]
+    this._audioTopics = [...(this._webrtcOptions.audioTopics ?? [])]
+    this.role = options?.role ?? 'mesh'
+    if (!['mesh', 'host', 'client'].includes(this.role)) {
+      throw new Error("role must be 'mesh', 'host', or 'client'")
+    }
+  }
+
+  static async withMqtt(
+    brokerUrl: string, sessionId: string,
+    options?: {
+      clientId?: string; timeout?: number; mqttOptions?: MqttOptions
+      reconnect?: boolean; webrtcOptions?: WebRtcOptions; role?: PeerRole
+    },
+  ): Promise<WebRtcConnection> {
+    const signaler = await MqttSignaler.create(brokerUrl, sessionId, {
+      ...options?.mqttOptions, clientId: options?.clientId, timeout: options?.timeout,
+    })
+    return new WebRtcConnection(signaler, options)
+  }
+
+  static async withHttp(
+    baseUrl: string, sessionId: string,
+    options?: HttpSignalerOptions & {
+      reconnect?: boolean; webrtcOptions?: WebRtcOptions; role?: PeerRole
+    },
+  ): Promise<WebRtcConnection> {
+    const signaler = await HttpSignaler.create(baseUrl, sessionId, options, false)
+    try { return new WebRtcConnection(signaler, options) }
+    catch (error) { await signaler.disconnect(); throw error }
+  }
+
+  get peerId(): string { return this._peerId }
+  get peerIds(): string[] {
+    return [...this._peers].filter(([, peer]) => peer.isDataReady).map(([id]) => id)
+  }
+  get isConnected(): boolean { return this.peerIds.length > 0 }
+  get useMediaChannels(): boolean { return this._webrtcOptions.useMediaChannels ?? true }
+  get mediaChannelJpegQuality(): number { return this._webrtcOptions.mediaChannelJpegQuality ?? 80 }
+  get videoTopics(): readonly string[] { return this._videoTopics }
+  get audioTopics(): readonly string[] { return this._audioTopics }
+  isVideoNegotiated(topic: string): boolean {
+    return this._readyPeers().some(peer => peer.isVideoNegotiated(topic))
+  }
+  isAudioNegotiated(topic: string): boolean {
+    return this._readyPeers().some(peer => peer.isAudioNegotiated(topic))
+  }
+
+  connect(timeout?: number): Promise<boolean> {
+    if (this._closed) return Promise.resolve(false)
+    if (this.isConnected) return Promise.resolve(true)
+    if (this._connectPromise) return this._connectPromise
+    this._connectPromise = new Promise<boolean>(resolve => {
+      this._connectResolve = resolve
+      if (timeout !== undefined) {
+        this._connectTimer = setTimeout(() => this._resolveConnect(false), timeout * 1000)
+      }
+    })
+    if (!this._started) {
+      this._started = true
+      void this._startSignaling().catch(error => {
+        Logger.warning(`WebRtcConnection: signaling start failed: ${error}`)
+        this._started = false
+        this._resolveConnect(false)
+      })
+    }
+    return this._connectPromise
+  }
+
+  private async _startSignaling(): Promise<void> {
+    if (this._signaler instanceof HttpSignaler) {
+      await this._signaler.announce(this._serializer.serialize(this._helloMessage()))
+    }
+    if (this._closed) return
+    this._signaler.subscribe(payload => this._onSignal(payload))
+    if (!this._hasCachedJoins()) this._broadcastHello()
+    this._discoveryTimer = setInterval(() => {
+      if (!this._hasCachedJoins() && (!this._everConnected || this._reconnect)) {
+        this._broadcastHello()
+      }
+      this._prunePeers()
+    }, 1000)
+  }
+
+  private _hasCachedJoins(): boolean {
+    return this._signaler instanceof HttpSignaler && this._signaler.supportsJoinAnnouncements
+  }
+
+  async disconnect(): Promise<void> {
+    if (this._closed) return
+    this._closed = true
+    this._resolveConnect(false)
+    if (this._discoveryTimer) clearInterval(this._discoveryTimer)
+    this._discoveryTimer = null
+    this._signaler.unsubscribe()
+    const peers = [...this._peers.values()]
+    this._peers.clear()
+    this._restartIds.clear()
+    await Promise.all(peers.map(peer => peer.disconnect()))
+    await this._signaler.disconnect()
+  }
+
+  private _resolveConnect(ready: boolean): void {
+    if (this._connectTimer) clearTimeout(this._connectTimer)
+    this._connectTimer = null
+    const resolve = this._connectResolve
+    this._connectResolve = null
+    this._connectPromise = null
+    resolve?.(ready)
+  }
+
+  _decodeSignal(payload: Uint8Array): Record<string, unknown> {
+    return this._serializer.deserialize(payload) as Record<string, unknown>
+  }
+
+  _publishSignal(message: Record<string, unknown>): void {
+    this._signaler.publish(this._serializer.serialize(message))
+  }
+
+  private _helloMessage(): Record<string, unknown> {
+    return {
+      type: 'hello', peer_id: this._peerId, role: this.role,
+      video_topics: this._videoTopics, audio_topics: this._audioTopics,
+    }
+  }
+
+  private _broadcastHello(): void {
+    try {
+      this._publishSignal(this._helloMessage())
+    } catch (error) {
+      Logger.warning(`WebRtcConnection: discovery send failed: ${error}`)
+    }
+  }
+
+  private _onSignal(payload: Uint8Array): void {
+    try {
+      const message = this._decodeSignal(payload)
+      if (!message || typeof message !== 'object') return
+      const remote = message['peer_id']
+      if (typeof remote !== 'string' || !remote || remote === this._peerId) return
+      if (message['to_peer_id'] !== undefined && message['to_peer_id'] !== this._peerId) return
+      const remoteRole = message['role'] ?? 'mesh'
+      if ((this.role === 'client' && remoteRole === 'client') ||
+          (this.role === 'host' && remoteRole === 'host')) return
+
+      let peer = this._peers.get(remote)
+      const restartId = message['restart_id']
+      const newRestart = message['type'] === 'hello' && typeof restartId === 'string' &&
+        restartId !== this._restartIds.get(remote)
+      if (newRestart) this._restartIds.set(remote, restartId as string)
+      if (peer && message['type'] === 'hello' &&
+          (newRestart || (peer.wasDataReady && !peer.isDataReady))) {
+        this._peers.delete(remote)
+        for (const [rid, origin] of this._rpcOrigins) {
+          if (origin === remote) this._rpcOrigins.delete(rid)
+        }
+        void peer.disconnect()
+        peer = undefined
+      }
+      if (!peer) {
+        const adapter = new PeerSignaler(this, remote)
+        peer = new PeerWebRtcConnection(adapter, {
+          webrtcOptions: {
+            ...this._webrtcOptions,
+            videoTopics: [...this._videoTopics], audioTopics: [...this._audioTopics],
+          },
+          peerId: this._peerId,
+          onReady: ready => {
+            if (ready) {
+              this._everConnected = true
+              this._resolveConnect(true)
+            }
+          },
+        })
+        this._peers.set(remote, peer)
+        for (const [topic, callbacks] of this._pubCallbacks) {
+          for (const callback of callbacks) peer.addPubCallback(topic, callback)
+        }
+        for (const [service, callback] of this._rpcServices) {
+          this._registerServiceOnPeer(peer, remote, service, callback)
+        }
+        for (const [rid, callback] of this._rpcReplies) peer.registerRpcReply(rid, callback)
+        for (const [topic, track] of this._localVideoTracks) peer.sendVideoTrack(track, topic)
+        for (const [topic, track] of this._localAudioTracks) peer.sendAudioTrack(track, topic)
+        this._attachTrackWaiters(peer, remote)
+        void peer.connect().catch(error =>
+          Logger.warning(`WebRtcConnection: peer connect failed: ${error}`)
+        )
+      }
+      // connect() subscribes synchronously before its first awaited operation.
+      ;(peer as PeerWebRtcConnection)._deliverSignal(payload)
+    } catch (error) {
+      Logger.warning(`WebRtcConnection: signaling dispatch failed: ${error}`)
+    }
+  }
+
+  private _prunePeers(): void {
+    for (const [remote, peer] of this._peers) {
+      if (peer.wasDataReady && !peer.isDataReady) {
+        this._peers.delete(remote)
+        for (const [rid, origin] of this._rpcOrigins) {
+          if (origin === remote) this._rpcOrigins.delete(rid)
+        }
+        void peer.disconnect()
+        if (this._hasCachedJoins() && this._reconnect) {
+          try {
+            this._publishSignal({
+              ...this._helloMessage(), to_peer_id: remote,
+              restart_id: getUniqueId(),
+            })
+          } catch (error) {
+            Logger.warning(`WebRtcConnection: recovery send failed: ${error}`)
+          }
+        }
+      }
+    }
+  }
+
+  private _readyPeers(): PeerWebRtcConnection[] {
+    return [...this._peers.values()].filter(peer => peer.isDataReady)
+  }
+
+  private _registerServiceOnPeer(
+    peer: PeerWebRtcConnection, remote: string, service: string, callback: RpcCallback,
+  ): void {
+    peer.addRpcService(service, msg => {
+      const rid = (msg as Record<string, unknown>)['rid']
+      if (typeof rid === 'string') this._rpcOrigins.set(rid, remote)
+      callback(msg)
+    })
+  }
+
+  sendData(msg: unknown): void {
+    const message = msg as Record<string, unknown>
+    if (message && (message['type'] === 'rpc_ack' || message['type'] === 'rpc_rep')) {
+      const rid = message['rid']
+      const remote = typeof rid === 'string' ? this._rpcOrigins.get(rid) : undefined
+      if (message['type'] === 'rpc_rep' && typeof rid === 'string') this._rpcOrigins.delete(rid)
+      if (remote) this._peers.get(remote)?.sendData(msg)
+      return
+    }
+    for (const peer of this._readyPeers()) peer.sendData(msg)
+  }
+
+  sendMediaFrame(msg: unknown): void {
+    for (const peer of this._readyPeers()) peer.sendMediaFrame(msg)
+  }
+
+  addPubCallback(topic: string, callback: PubCallback): void {
+    if (!this._pubCallbacks.has(topic)) this._pubCallbacks.set(topic, new Set())
+    this._pubCallbacks.get(topic)!.add(callback)
+    for (const peer of this._peers.values()) peer.addPubCallback(topic, callback)
+  }
+  removePubCallback(topic: string, callback: PubCallback): void {
+    this._pubCallbacks.get(topic)?.delete(callback)
+    for (const peer of this._peers.values()) peer.removePubCallback(topic, callback)
+  }
+  addRpcService(service: string, callback: RpcCallback): void {
+    this._rpcServices.set(service, callback)
+    for (const [remote, peer] of this._peers) {
+      this._registerServiceOnPeer(peer, remote, service, callback)
+    }
+  }
+  removeRpcService(service: string): void {
+    this._rpcServices.delete(service)
+    for (const peer of this._peers.values()) peer.removeRpcService(service)
+  }
+  registerRpcReply(rid: string, callback: RpcCallback): void {
+    this._rpcReplies.set(rid, callback)
+    for (const peer of this._peers.values()) peer.registerRpcReply(rid, callback)
+  }
+  unregisterRpcReply(rid: string): void {
+    this._rpcReplies.delete(rid)
+    for (const peer of this._peers.values()) peer.unregisterRpcReply(rid)
+  }
+
+  sendVideoTrack(track: MediaStreamTrack, topic: string): void {
+    if (!this._videoTopics.includes(topic)) this._videoTopics.push(topic)
+    this._localVideoTracks.set(topic, track)
+    for (const peer of this._peers.values()) peer.sendVideoTrack(track, topic)
+  }
+  sendAudioTrack(track: MediaStreamTrack, topic: string): void {
+    if (!this._audioTopics.includes(topic)) this._audioTopics.push(topic)
+    this._localAudioTracks.set(topic, track)
+    for (const peer of this._peers.values()) peer.sendAudioTrack(track, topic)
+  }
+
+  receiveVideoTrack(topic: string, peerId?: string): Promise<MediaStreamTrack> {
+    if (!this._videoTopics.includes(topic)) this._videoTopics.push(topic)
+    return new Promise(resolve => {
+      let resolved = false
+      const finish = (track: MediaStreamTrack) => {
+        if (resolved) return
+        resolved = true
+        const remaining = this._videoWaiters.get(topic)?.filter(waiter => waiter.resolve !== finish)
+        if (remaining?.length) this._videoWaiters.set(topic, remaining)
+        else this._videoWaiters.delete(topic)
+        resolve(track)
+      }
+      const list = this._videoWaiters.get(topic) ?? []
+      list.push({ peerId, resolve: finish })
+      this._videoWaiters.set(topic, list)
+      for (const [remote, peer] of this._peers) {
+        if (!peerId || peerId === remote) peer.receiveVideoTrack(topic).then(finish)
+      }
+    })
+  }
+  receiveAudioTrack(topic: string, peerId?: string): Promise<MediaStreamTrack> {
+    if (!this._audioTopics.includes(topic)) this._audioTopics.push(topic)
+    return new Promise(resolve => {
+      let resolved = false
+      const finish = (track: MediaStreamTrack) => {
+        if (resolved) return
+        resolved = true
+        const remaining = this._audioWaiters.get(topic)?.filter(waiter => waiter.resolve !== finish)
+        if (remaining?.length) this._audioWaiters.set(topic, remaining)
+        else this._audioWaiters.delete(topic)
+        resolve(track)
+      }
+      const list = this._audioWaiters.get(topic) ?? []
+      list.push({ peerId, resolve: finish })
+      this._audioWaiters.set(topic, list)
+      for (const [remote, peer] of this._peers) {
+        if (!peerId || peerId === remote) peer.receiveAudioTrack(topic).then(finish)
+      }
+    })
+  }
+  private _attachTrackWaiters(peer: PeerWebRtcConnection, remote: string): void {
+    for (const [topic, waiters] of this._videoWaiters) {
+      for (const waiter of waiters) {
+        if (!waiter.peerId || waiter.peerId === remote) {
+          peer.receiveVideoTrack(topic).then(waiter.resolve)
+        }
+      }
+    }
+    for (const [topic, waiters] of this._audioWaiters) {
+      for (const waiter of waiters) {
+        if (!waiter.peerId || waiter.peerId === remote) {
+          peer.receiveAudioTrack(topic).then(waiter.resolve)
+        }
+      }
+    }
   }
 }

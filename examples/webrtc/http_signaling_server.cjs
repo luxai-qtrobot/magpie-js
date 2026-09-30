@@ -19,7 +19,7 @@ app.use('/signal', cors({
   ))),
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
-  exposedHeaders: ['X-Magpie-Sequence'],
+  exposedHeaders: ['X-Magpie-Sequence', 'X-Magpie-Join-Announcements'],
 }))
 
 app.use('/signal', (req, res, next) => {

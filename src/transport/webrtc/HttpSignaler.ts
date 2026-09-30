@@ -51,6 +51,8 @@ export class HttpSignaler extends WebRtcSignaler {
   private readonly _outgoing: Outgoing[] = []
   private _callback: ((payload: Uint8Array) => void) | null = null
   private _cursor = 0
+  private _announcement = new Uint8Array(0)
+  private _supportsJoinAnnouncements = false
   private _closed = false
   private _sending = false
   private _polling = false
@@ -82,14 +84,25 @@ export class HttpSignaler extends WebRtcSignaler {
     this._messagesUrl = `${this._peerUrl}/messages`
   }
 
-  /** Register a mailbox before WebRtcConnection.connect() begins negotiation. */
-  static async create(baseUrl: string, sessionId: string, options: HttpSignalerOptions = {}): Promise<HttpSignaler> {
+  /** Direct signaler users register immediately; withHttp registers with its hello on connect(). */
+  static async create(
+    baseUrl: string, sessionId: string, options: HttpSignalerOptions = {},
+    registerOnCreate = true,
+  ): Promise<HttpSignaler> {
     const signaler = new HttpSignaler(baseUrl, sessionId, options)
-    await signaler._register()
+    if (registerOnCreate) await signaler._register()
     return signaler
   }
 
   get sessionId(): string { return this._sessionId }
+  get supportsJoinAnnouncements(): boolean { return this._supportsJoinAnnouncements }
+
+  async announce(payload: Uint8Array): Promise<boolean> {
+    if (this._closed) throw new Error('HttpSignaler is disconnected')
+    this._announcement = Uint8Array.from(payload)
+    await this._register(false)
+    return this._supportsJoinAnnouncements
+  }
 
   publish(payload: Uint8Array): void {
     if (this._closed) throw new Error('HttpSignaler is disconnected')
@@ -141,13 +154,17 @@ export class HttpSignaler extends WebRtcSignaler {
     }
   }
 
-  private async _register(): Promise<void> {
-    const response = await this._request('PUT', this._peerUrl)
+  private async _register(resetCursor = true): Promise<void> {
+    const response = await this._request('PUT', this._peerUrl, {
+      body: this._announcement as Uint8Array<ArrayBuffer>,
+      headers: { 'Content-Type': 'application/octet-stream' },
+    })
     if (response.status === 409) {
-      throw new Error(`HTTP signaling session ${JSON.stringify(this._sessionId)} already has two participants`)
+      throw new Error(`HTTP signaling session ${JSON.stringify(this._sessionId)} rejected this participant (409 Conflict)`)
     }
     this._check(response)
-    this._cursor = 0 // relay may have restarted its sequence numbers
+    this._supportsJoinAnnouncements = response.headers.get('X-Magpie-Join-Announcements') === '1'
+    if (resetCursor) this._cursor = 0 // relay may have restarted its sequence numbers
   }
 
   private _check(response: Response): void {

@@ -251,14 +251,17 @@ await conn.connect()
 
 WebRTC enables **P2P communication over the internet** — no broker in the data path after the initial signaling handshake. Signaling can use MQTT or the shared HTTP relay protocol.
 
+One `WebRtcConnection` owns a separate WebRTC link to each remote peer. `connect()` resolves when the first peer is ready, and `peerIds` lists connected remotes as others join. A stream writer publishes to all of them; RPC ACKs and replies return to the requester. Use `role: 'host'` on a service and `role: 'client'` on each caller or viewer to avoid client-to-client links. The default `role: 'mesh'` connects all participants.
+
 > **Browser only:** WebRTC uses native browser APIs (`RTCPeerConnection`). This transport is not available in Node.js.
 
-For HTTP signaling, start the example Node server (`npm install --no-save express cors`, then `node examples/webrtc/http_signaling_server.cjs`) or use the Python example server. The server does not import MAGPIE. In the browser messaging and video demos, enter `http://127.0.0.1:8000/signal` in the signaling URL field; the demo selects HTTP automatically. Both peers must use the same session ID. The browser page must be served over HTTP or HTTPS, and the signaling server must allow its origin via CORS.
+For HTTP signaling, start the example Node server (`npm install --no-save express cors`, then `node examples/webrtc/http_signaling_server.cjs`) or use the Python example server. The server does not import MAGPIE. The updated relays cache each peer's initial hello during registration, so healthy peers do not repeatedly POST hello messages. Older relays still work through periodic hello POSTs. In the browser messaging and video demos, enter `http://127.0.0.1:8000/signal` in the signaling URL field; the demo selects HTTP automatically. Both peers must use the same session ID. The browser page must be served over HTTP or HTTPS, and the signaling server must allow its origin via CORS.
 
 ```javascript
 const conn = await WebRtcConnection.withHttp('https://signal.example.com/webrtc', 'my-node', {
   headers: { 'X-Tenant': 'my-team' },
   headersProvider: async () => ({ Authorization: `Bearer ${await getToken()}` }),
+  role: 'client',
   reconnect: true,
   webrtcOptions: { videoTopics: ['/camera/color/image'] },
 })
@@ -272,7 +275,7 @@ The URL prefix is chosen by the server. `headersProvider` runs before each reque
 ```javascript
 import { WebRtcConnection, WebRtcStreamWriter } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node', { role: 'host' })
 await conn.connect(60)
 
 const writer = new WebRtcStreamWriter(conn)
@@ -287,7 +290,7 @@ await conn.disconnect()
 ```javascript
 import { WebRtcConnection, WebRtcStreamReader, TimeoutError } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node', { role: 'client' })
 await conn.connect(60)
 
 const reader = new WebRtcStreamReader(conn, 'service/state')
@@ -314,7 +317,7 @@ No broker in the hot path — the data channel is bidirectional P2P.
 ```javascript
 import { WebRtcConnection, WebRtcRpcResponder } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node-rpc')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node-rpc', { role: 'host' })
 await conn.connect(60)
 
 const server = new WebRtcRpcResponder(conn, 'service/actions')
@@ -326,7 +329,7 @@ server.onRequest((request) => ({ status: 'ok', echo: request }))
 ```javascript
 import { WebRtcConnection, WebRtcRpcRequester } from '@luxai-qtrobot/magpie'
 
-const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node-rpc')
+const conn = await WebRtcConnection.withMqtt('wss://broker.hivemq.com:8884/mqtt', 'my-node-rpc', { role: 'client' })
 await conn.connect(60)
 
 const client = new WebRtcRpcRequester(conn, 'service/actions')
@@ -377,6 +380,10 @@ const videoEl = document.getElementById('video')
 videoEl.srcObject = new MediaStream([videoTrack])
 await videoEl.play()
 ```
+
+If several remote peers publish the same media topic, pass a remote ID as the
+second argument to `receiveVideoTrack(topic, peerId)` or
+`receiveAudioTrack(topic, peerId)`. Without it, the first arriving track wins.
 
 For sending local camera/mic to the remote peer:
 

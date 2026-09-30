@@ -59,6 +59,7 @@ async function toggleConnect() {
   try {
     const options = {
       reconnect: true,
+      role: 'client',
       webrtcOptions: {
         ...(noStun ? { stunServers: [] } : {}),
         videoTopics: [videoTopic],

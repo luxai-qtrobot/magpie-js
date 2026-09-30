@@ -11,9 +11,18 @@ afterEach(async () => {
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
 })
 
-async function relayServer(authorize = false) {
+async function relayServer(authorize = false, advertiseJoins = true) {
   const relay = new InMemoryRelay()
-  const handler = createNodeHandler(new SignalingHTTP(relay))
+  const protocol = new SignalingHTTP(relay)
+  if (!advertiseJoins) {
+    const handle = protocol.handle.bind(protocol)
+    protocol.handle = async (request: { method: string }) => {
+      const response = await handle(request)
+      if (request.method === 'PUT') delete response.headers?.['X-Magpie-Join-Announcements']
+      return response
+    }
+  }
+  const handler = createNodeHandler(protocol)
   const server = createServer((req, res) => {
     if (authorize && req.headers.authorization !== 'Bearer refreshed') {
       res.writeHead(401).end()
@@ -29,6 +38,70 @@ async function relayServer(authorize = false) {
 }
 
 describe('HTTP signaling interoperability contract', () => {
+  it('caches join announcements for later peers without repeating them', async () => {
+    const { baseUrl } = await relayServer()
+    const room = Buffer.from('cached').toString('base64url')
+    const peer = (id: string) => `${baseUrl}/sessions/${room}/peers/${Buffer.from(id).toString('base64url')}`
+    const put = (id: string, hello: string) => fetch(peer(id), { method: 'PUT', body: hello })
+    const inbox = async (id: string, after = 0) => {
+      const response = await fetch(peer(id) + `/messages?after=${after}&wait=0`)
+      return { status: response.status, body: await response.text() }
+    }
+    const first = await put('a', 'hello-a')
+    expect(first.headers.get('X-Magpie-Join-Announcements')).toBe('1')
+    expect((await inbox('a')).status).toBe(204)
+    await put('b', 'hello-b')
+    expect((await inbox('a')).body).toBe('hello-b')
+    expect((await inbox('b')).body).toBe('hello-a')
+    await put('c', 'hello-c')
+    expect((await inbox('c')).body).toBe('hello-a')
+    expect((await inbox('c', 1)).body).toBe('hello-b')
+    expect((await inbox('a', 1)).body).toBe('hello-c')
+    await put('b', 'hello-b')
+    expect((await inbox('a', 2)).status).toBe(204)
+  })
+
+  it('registers one cached hello and makes no periodic POST while alone', async () => {
+    const { baseUrl, relay } = await relayServer()
+    const sent: Uint8Array[] = []
+    const originalSend = relay.send.bind(relay)
+    relay.send = (...args: Parameters<typeof relay.send>) => {
+      sent.push(args[3])
+      return originalSend(...args)
+    }
+    const conn = await WebRtcConnection.withHttp(baseUrl, 'quiet', {
+      pollWait: 0.2, webrtcOptions: { stunServers: [] },
+    })
+    try {
+      expect(await conn.connect(1.3)).toBe(false)
+      const room = Buffer.from('quiet').toString('base64url')
+      const participant = Buffer.from((conn as unknown as { _signaler: HttpSignaler })._signaler.participantId).toString('base64url')
+      expect(relay.rooms.get(room)?.get(participant)?.announcement?.length).toBeGreaterThan(0)
+      expect(sent).toEqual([])
+    } finally {
+      await conn.disconnect()
+    }
+  })
+
+  it('falls back to periodic hello POSTs when the relay lacks the join header', async () => {
+    const { baseUrl, relay } = await relayServer(false, false)
+    const sent: Uint8Array[] = []
+    const originalSend = relay.send.bind(relay)
+    relay.send = (...args: Parameters<typeof relay.send>) => {
+      sent.push(args[3])
+      return originalSend(...args)
+    }
+    const conn = await WebRtcConnection.withHttp(baseUrl, 'legacy', {
+      pollWait: 0.2, webrtcOptions: { stunServers: [] },
+    })
+    try {
+      expect(await conn.connect(1.3)).toBe(false)
+      expect(sent.length).toBeGreaterThan(0)
+    } finally {
+      await conn.disconnect()
+    }
+  })
+
   it('routes opaque bytes, preserves UTF-8 IDs, refreshes headers, and releases peers', async () => {
     const { baseUrl, relay } = await relayServer(true)
     let providerCalls = 0
@@ -46,17 +119,20 @@ describe('HTTP signaling interoperability contract', () => {
     const encodedPeer = Buffer.from('peer / α').toString('base64url')
     expect(relay.rooms.get(encodedRoom)?.has(encodedPeer)).toBe(true)
 
+    let c: HttpSignaler | null = null
     try {
       const received = new Promise<Uint8Array>(resolve => b.subscribe(resolve))
       a.publish(Uint8Array.from([0, 255, 20]))
       expect(Array.from(await received)).toEqual([0, 255, 20])
       expect(providerCalls).toBeGreaterThanOrEqual(2)
-      await expect(HttpSignaler.create(baseUrl, 'room with / slash', {
+      c = await HttpSignaler.create(baseUrl, 'room with / slash', {
         headers: { Authorization: 'Bearer refreshed' },
-      })).rejects.toThrow('already has two participants')
+      })
+      expect(relay.rooms.get(encodedRoom)?.size).toBe(3)
     } finally {
       await a.disconnect()
       await b.disconnect()
+      await c?.disconnect()
     }
     expect(relay.rooms.has(encodedRoom)).toBe(false)
   })
